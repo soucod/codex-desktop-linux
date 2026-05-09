@@ -479,33 +479,6 @@ impl ComputerUseLinux {
             }
         };
 
-        if let Some(scroll_key) = keyboard_scroll_key(direction) {
-            if let Ok(Some(focus)) = self
-                .focus_window_at_point_for_keyboard_scroll(target_point)
-                .await
-            {
-                let Some(args) = ydotool_key_args(scroll_key) else {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message: format!("Unsupported keyboard scroll key: {scroll_key}"),
-                        received,
-                    });
-                };
-                let commands = (0..keyboard_scroll_pages(params.pages))
-                    .map(|_| args.clone())
-                    .collect::<Vec<_>>();
-                let result = run_ydotool_sequence(&commands);
-                return Json(action_result_with_focus(
-                    "scroll",
-                    result,
-                    received,
-                    Some(focus),
-                ));
-            }
-        }
-
         if let Some(session) = self.cached_portal_pointer_session() {
             match portal_scroll(&session, target_point, direction, units).await {
                 Ok(()) => {
@@ -647,22 +620,18 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let result = if is_bare_space_key(&params.key) {
-            run_ydotool_type_text(" ").map(|output| vec![output])
-        } else {
-            let Some(key_events) = key_sequence(&params.key) else {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "press_key".to_string(),
-                    message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
-                    received,
-                });
-            };
-            let mut args = vec!["key".to_string()];
-            args.extend(key_events);
-            run_ydotool(&args).map(|output| vec![output])
+        let Some(key_events) = key_sequence(&params.key) else {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "press_key".to_string(),
+                message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
+                received,
+            });
         };
+        let mut args = vec!["key".to_string()];
+        args.extend(key_events);
+        let result = run_ydotool(&args).map(|output| vec![output]);
         Json(action_result_with_focus(
             "press_key",
             result,
@@ -1177,30 +1146,6 @@ impl ComputerUseLinux {
                 focus.focused_window.as_ref().map(|window| window.window_id)
             ))
         }
-    }
-
-    async fn focus_window_at_point_for_keyboard_scroll(
-        &self,
-        target_point: Option<(i32, i32)>,
-    ) -> std::result::Result<Option<WindowFocusResult>, String> {
-        let Some(point) = target_point else {
-            return Ok(None);
-        };
-
-        let windows = list_windows().await.map_err(|error| format!("{error:#}"))?;
-        let Some(window) = window_at_point(&windows, point) else {
-            return Ok(None);
-        };
-
-        if window.backend != "kwin" {
-            return Ok(None);
-        }
-
-        self.focus_target_for_input(&WindowTarget {
-            window_id: Some(window.window_id),
-            ..Default::default()
-        })
-        .await
     }
 
     fn cache_nodes(&self, nodes: &[AccessibilityNode]) {
@@ -1879,12 +1824,6 @@ fn absolute_mousemove_args(x: i32, y: i32) -> Vec<String> {
     ]
 }
 
-fn ydotool_key_args(key: &str) -> Option<Vec<String>> {
-    let mut args = vec!["key".to_string()];
-    args.extend(key_sequence(key)?);
-    Some(args)
-}
-
 fn wheel_mousemove_args(dx: i32, dy: i32) -> Vec<String> {
     vec![
         "mousemove".to_string(),
@@ -1904,58 +1843,6 @@ fn run_ydotool_sequence(commands: &[Vec<String>]) -> std::result::Result<Vec<Out
         }
     }
     Ok(outputs)
-}
-
-fn keyboard_scroll_key(direction: ScrollDirection) -> Option<&'static str> {
-    match direction {
-        ScrollDirection::Up => Some("PageUp"),
-        ScrollDirection::Down => Some("PageDown"),
-        ScrollDirection::Left | ScrollDirection::Right => None,
-    }
-}
-
-fn keyboard_scroll_pages(pages: Option<f64>) -> usize {
-    pages.unwrap_or(1.0).abs().ceil().clamp(1.0, 20.0) as usize
-}
-
-fn window_at_point(windows: &[WindowInfo], point: (i32, i32)) -> Option<&WindowInfo> {
-    let matches = windows
-        .iter()
-        .filter(|window| !window.hidden)
-        .filter(|window| window_contains_point(window, point))
-        .collect::<Vec<_>>();
-
-    matches
-        .iter()
-        .copied()
-        .find(|window| window.focused)
-        .or_else(|| {
-            matches
-                .into_iter()
-                .min_by_key(|window| window_bounds_area(window).unwrap_or(u64::MAX))
-        })
-}
-
-fn window_contains_point(window: &WindowInfo, (x, y): (i32, i32)) -> bool {
-    let Some(bounds) = &window.bounds else {
-        return false;
-    };
-    let Some(left) = bounds.x else {
-        return false;
-    };
-    let Some(top) = bounds.y else {
-        return false;
-    };
-    let right = left.saturating_add(bounds.width as i32);
-    let bottom = top.saturating_add(bounds.height as i32);
-    x >= left && x < right && y >= top && y < bottom
-}
-
-fn window_bounds_area(window: &WindowInfo) -> Option<u64> {
-    window
-        .bounds
-        .as_ref()
-        .map(|bounds| bounds.width as u64 * bounds.height as u64)
 }
 
 fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
@@ -2061,54 +1948,68 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
     let (key_part, modifier_parts) = parts.split_last()?;
+    if modifier_parts.is_empty() {
+        if let Some(modifier) = modifier_keycode(key_part) {
+            return Some(vec![format!("{modifier}:1"), format!("{modifier}:0")]);
+        }
+    }
     let mut modifiers = Vec::new();
     for part in modifier_parts {
-        modifiers.push(modifier_key_name(part)?);
+        modifiers.push(modifier_keycode(part)?);
     }
-    let key = modifier_key_name(key_part).or_else(|| key_name(key_part))?;
+    let keycode = keycode(key_part)?;
 
-    if modifiers.is_empty() {
-        return Some(vec![key]);
+    let mut events = Vec::new();
+    for modifier in &modifiers {
+        events.push(format!("{modifier}:1"));
     }
-
-    modifiers.push(key);
-    Some(vec![modifiers.join("+")])
+    events.push(format!("{keycode}:1"));
+    events.push(format!("{keycode}:0"));
+    for modifier in modifiers.iter().rev() {
+        events.push(format!("{modifier}:0"));
+    }
+    Some(events)
 }
 
-fn is_bare_space_key(key: &str) -> bool {
-    matches!(normalize_key(key).as_str(), "space")
-}
-
-fn modifier_key_name(key: &str) -> Option<String> {
+fn modifier_keycode(key: &str) -> Option<u16> {
     match normalize_key(key).as_str() {
-        "ctrl" | "control" => Some("ctrl".to_string()),
-        "alt" | "option" => Some("alt".to_string()),
-        "shift" => Some("shift".to_string()),
-        "meta" | "super" | "cmd" | "command" => Some("super".to_string()),
+        "ctrl" | "control" => Some(29),
+        "alt" | "option" => Some(56),
+        "shift" => Some(42),
+        "meta" | "super" | "cmd" | "command" => Some(125),
         _ => None,
     }
 }
 
-fn key_name(key: &str) -> Option<String> {
+fn keycode(key: &str) -> Option<u16> {
     match normalize_key(key).as_str() {
-        "enter" | "return" => Some("enter".to_string()),
-        "escape" | "esc" => Some("esc".to_string()),
-        "tab" => Some("tab".to_string()),
-        "backspace" => Some("backspace".to_string()),
-        "delete" | "del" => Some("delete".to_string()),
-        "space" => Some("space".to_string()),
-        "home" => Some("home".to_string()),
-        "end" => Some("end".to_string()),
-        "pageup" | "page_up" => Some("pageup".to_string()),
-        "pagedown" | "page_down" => Some("pagedown".to_string()),
-        "arrowleft" | "left" => Some("left".to_string()),
-        "arrowright" | "right" => Some("right".to_string()),
-        "arrowup" | "up" => Some("up".to_string()),
-        "arrowdown" | "down" => Some("down".to_string()),
-        "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" => {
-            Some(normalize_key(key))
-        }
-        value if value.len() == 1 => key_name_for_ascii(value.as_bytes()[0] as char),
+        "enter" | "return" => Some(28),
+        "escape" | "esc" => Some(1),
+        "tab" => Some(15),
+        "backspace" => Some(14),
+        "delete" | "del" => Some(111),
+        "space" => Some(57),
+        "home" => Some(102),
+        "end" => Some(107),
+        "pageup" | "page_up" => Some(104),
+        "pagedown" | "page_down" => Some(109),
+        "arrowleft" | "left" => Some(105),
+        "arrowright" | "right" => Some(106),
+        "arrowup" | "up" => Some(103),
+        "arrowdown" | "down" => Some(108),
+        "f1" => Some(59),
+        "f2" => Some(60),
+        "f3" => Some(61),
+        "f4" => Some(62),
+        "f5" => Some(63),
+        "f6" => Some(64),
+        "f7" => Some(65),
+        "f8" => Some(66),
+        "f9" => Some(67),
+        "f10" => Some(68),
+        "f11" => Some(87),
+        "f12" => Some(88),
+        value if value.len() == 1 => keycode_for_ascii(value.as_bytes()[0] as char),
         _ => None,
     }
 }
@@ -2117,9 +2018,44 @@ fn normalize_key(key: &str) -> String {
     key.trim().to_ascii_lowercase().replace(['-', ' '], "")
 }
 
-fn key_name_for_ascii(value: char) -> Option<String> {
+fn keycode_for_ascii(value: char) -> Option<u16> {
     match value {
-        'a'..='z' | '0'..='9' => Some(value.to_string()),
+        'a' => Some(30),
+        'b' => Some(48),
+        'c' => Some(46),
+        'd' => Some(32),
+        'e' => Some(18),
+        'f' => Some(33),
+        'g' => Some(34),
+        'h' => Some(35),
+        'i' => Some(23),
+        'j' => Some(36),
+        'k' => Some(37),
+        'l' => Some(38),
+        'm' => Some(50),
+        'n' => Some(49),
+        'o' => Some(24),
+        'p' => Some(25),
+        'q' => Some(16),
+        'r' => Some(19),
+        's' => Some(31),
+        't' => Some(20),
+        'u' => Some(22),
+        'v' => Some(47),
+        'w' => Some(17),
+        'x' => Some(45),
+        'y' => Some(21),
+        'z' => Some(44),
+        '1' => Some(2),
+        '2' => Some(3),
+        '3' => Some(4),
+        '4' => Some(5),
+        '5' => Some(6),
+        '6' => Some(7),
+        '7' => Some(8),
+        '8' => Some(9),
+        '9' => Some(10),
+        '0' => Some(11),
         _ => None,
     }
 }
@@ -2720,92 +2656,26 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_scroll_uses_page_keys_for_vertical_directions() {
-        assert_eq!(keyboard_scroll_key(ScrollDirection::Down), Some("PageDown"));
-        assert_eq!(keyboard_scroll_key(ScrollDirection::Up), Some("PageUp"));
-        assert_eq!(keyboard_scroll_key(ScrollDirection::Left), None);
-        assert_eq!(keyboard_scroll_pages(Some(2.2)), 3);
-        assert_eq!(keyboard_scroll_pages(Some(0.0)), 1);
-        assert_eq!(keyboard_scroll_pages(Some(100.0)), 20);
-    }
-
-    #[test]
-    fn window_at_point_prefers_focused_containing_window() {
-        let mut background =
-            window_info(1, Some("Background"), Some("app"), Some("app"), Some(100));
-        background.bounds = Some(WindowBounds {
-            x: Some(0),
-            y: Some(0),
-            width: 1000,
-            height: 1000,
-        });
-
-        let mut focused = window_info(2, Some("Kate"), Some("kate"), Some("kate"), Some(200));
-        focused.focused = true;
-        focused.bounds = Some(WindowBounds {
-            x: Some(100),
-            y: Some(100),
-            width: 500,
-            height: 500,
-        });
-
-        let windows = [background, focused];
-        let selected = window_at_point(&windows, (250, 250)).unwrap();
-
-        assert_eq!(selected.window_id, 2);
-    }
-
-    #[test]
-    fn window_at_point_ignores_hidden_and_out_of_bounds_windows() {
-        let mut hidden = window_info(1, Some("Hidden"), Some("app"), Some("app"), Some(100));
-        hidden.hidden = true;
-        hidden.bounds = Some(WindowBounds {
-            x: Some(0),
-            y: Some(0),
-            width: 1000,
-            height: 1000,
-        });
-
-        let visible = window_info(2, Some("Visible"), Some("app"), Some("app"), Some(200));
-
-        let windows = [hidden, visible];
-        assert!(window_at_point(&windows, (900, 900)).is_none());
-    }
-
-    #[test]
     fn key_sequence_presses_modifiers_around_key() {
         assert_eq!(
             key_sequence("Ctrl+Shift+P"),
-            Some(vec!["ctrl+shift+p".to_string()])
+            Some(vec![
+                "29:1".to_string(),
+                "42:1".to_string(),
+                "25:1".to_string(),
+                "25:0".to_string(),
+                "42:0".to_string(),
+                "29:0".to_string(),
+            ])
         );
     }
 
     #[test]
     fn key_sequence_presses_bare_modifier() {
-        assert_eq!(key_sequence("Super"), Some(vec!["super".to_string()]));
-    }
-
-    #[test]
-    fn key_sequence_uses_ydotool_key_names_for_navigation_keys() {
-        assert_eq!(key_sequence("Delete"), Some(vec!["delete".to_string()]));
         assert_eq!(
-            key_sequence("Ctrl+Home"),
-            Some(vec!["ctrl+home".to_string()])
+            key_sequence("Super"),
+            Some(vec!["125:1".to_string(), "125:0".to_string()])
         );
-        assert_eq!(
-            key_sequence("Shift+ArrowRight"),
-            Some(vec!["shift+right".to_string()])
-        );
-        assert_eq!(
-            ydotool_key_args("PageDown"),
-            Some(vec!["key".to_string(), "pagedown".to_string(),])
-        );
-    }
-
-    #[test]
-    fn bare_space_uses_text_input_path() {
-        assert!(is_bare_space_key("Space"));
-        assert!(!is_bare_space_key("Shift+Space"));
     }
 
     #[test]

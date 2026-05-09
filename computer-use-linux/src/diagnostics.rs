@@ -431,7 +431,7 @@ fn readiness_report(
     let can_focus_apps = windowing.can_focus_apps;
     let can_focus_windows = windowing.can_focus_windows;
     let can_send_development_input =
-        input.ydotool.ok && ((input.ydotoold.ok && input.ydotool_socket.ok) || input.uinput.ok);
+        input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok;
 
     if !can_build_accessibility_tree {
         blockers.push(
@@ -458,7 +458,7 @@ fn readiness_report(
 
     if !can_send_development_input {
         blockers.push(
-            "Development input fallback is unavailable; ydotool needs either a connectable ydotoold socket or read/write access to /dev/uinput."
+            "Development input fallback is unavailable; ydotool needs a running ydotoold daemon with a connectable ydotoold socket."
                 .to_string(),
         );
     }
@@ -478,7 +478,8 @@ fn readiness_report(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Fix ydotool input access: start ydotoold with a socket accessible to this desktop user, or allow direct read/write access to /dev/uinput.".to_string()
+        "Fix ydotool input access: start ydotoold with a socket accessible to this desktop user."
+            .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and ydotool input fallback are available."
             .to_string()
@@ -879,6 +880,27 @@ mod tests {
 
         assert!(readiness.can_send_development_input);
         assert!(readiness.blockers.is_empty());
+    }
+
+    #[test]
+    fn readiness_rejects_direct_uinput_without_connectable_ydotool_socket() {
+        let platform = platform_report();
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no connectable ydotool socket"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+
+        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+
+        assert!(!readiness.can_send_development_input);
+        assert!(readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("connectable ydotoold socket")));
     }
 
     #[test]
