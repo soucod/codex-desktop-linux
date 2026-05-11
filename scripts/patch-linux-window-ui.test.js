@@ -413,9 +413,14 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.match(patched, /codexLinuxApplyAvatarCompositorHints\(e\)/);
   assert.match(patched, /getNativeWindowHandle\?\.\(\)/);
   assert.match(patched, /u\.execFile\(`xdotool`,\[`search`,`--pid`,String\(process\.pid\)\]/);
+  assert.match(patched, /u\.execFile\(`xwininfo`,\[`-id`,e\]/);
   assert.match(patched, /u\.execFile\(`xprop`/);
   assert.match(patched, /_GTK_FRAME_EXTENTS/);
-  assert.match(patched, /this\.codexLinuxIsI3Session\(\)\)\{this\.codexLinuxStopAvatarPassthroughRecovery\(\),this\.codexLinuxAvatarInputShapeKey=null,this\.pointerInteractive=!0,this\.mousePassthroughEnabled&&\(this\.mousePassthroughEnabled=!1\),e\.setIgnoreMouseEvents\(!1\);return\}/);
+  assert.match(patched, /Override Redirect State/);
+  assert.match(patched, /Absolute upper-left X/);
+  assert.match(patched, /Number\(l\)!==t\.x/);
+  assert.match(patched, /Number\(d\)!==t\.width/);
+  assert.doesNotMatch(patched, /this\.codexLinuxIsI3Session\(\)\)\{this\.codexLinuxStopAvatarPassthroughRecovery\(\),this\.codexLinuxAvatarInputShapeKey=null,this\.pointerInteractive=!0,this\.mousePassthroughEnabled&&\(this\.mousePassthroughEnabled=!1\),e\.setIgnoreMouseEvents\(!1\);return\}/);
   assert.match(patched, /typeof e\.setShape==`function`&&!this\.codexLinuxIsI3Session\(\)/);
   assert.match(patched, /if\(t==null\)return null/);
   assert.match(patched, /if\(t==null\)return!1;let n=JSON\.stringify\(t\)/);
@@ -446,6 +451,8 @@ test("upgrades older i3 avatar compositor hint patches", () => {
   const patched = applyPatchTwice(applyLinuxAvatarOverlayMousePassthroughPatch, source);
 
   assert.match(patched, /u\.execFile\(`xdotool`,\[`search`,`--pid`,String\(process\.pid\)\]/);
+  assert.match(patched, /u\.execFile\(`xwininfo`,\[`-id`,e\]/);
+  assert.match(patched, /Override Redirect State/);
   assert.match(patched, /this\.window=t,this\.codexLinuxAvatarCompositorHintsApplied=!1,this\.codexLinuxAvatarCompositorHintsApplying=!1,this\.rendererReady=/);
   assert.doesNotMatch(patched, /let t=null;try\{let n=e\.getNativeWindowHandle/);
   assert.doesNotMatch(patched, /this\.window=t,this\.codexLinuxApplyAvatarCompositorHints\(t\),this\.rendererReady=/);
@@ -457,7 +464,10 @@ test("upgrades intermediate i3 avatar compositor hint patches", () => {
   const patched = applyPatchTwice(applyLinuxAvatarOverlayMousePassthroughPatch, source);
 
   assert.match(patched, /this\.window=t,this\.codexLinuxAvatarCompositorHintsApplied=!1,this\.codexLinuxAvatarCompositorHintsApplying=!1,this\.rendererReady=/);
+  assert.match(patched, /u\.execFile\(`xwininfo`,\[`-id`,e\]/);
+  assert.match(patched, /Override Redirect State/);
   assert.doesNotMatch(patched, /this\.codexLinuxAvatarCompositorHintsApplied=!1,process\.platform===`linux`&&this\.codexLinuxApplyAvatarCompositorHints\(t\),this\.rendererReady=/);
+  assert.doesNotMatch(patched, /for\(let a of t\)try\{u\.execFile\(`xprop`/);
 });
 
 test("adds Linux window icon handling when an icon asset is available", () => {
