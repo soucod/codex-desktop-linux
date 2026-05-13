@@ -6,8 +6,10 @@ use crate::atspi_tree::{
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
-    click as portal_click, drag as portal_drag, scroll as portal_scroll,
-    start_portal_pointer_session, PointerButton, PortalPointerSession, ScrollDirection,
+    click as portal_click, drag as portal_drag, keysyms_for_text, press_keycode_chord,
+    scroll as portal_scroll, start_portal_keyboard_session, start_portal_pointer_session,
+    type_text_with_keysyms, PointerButton, PortalKeyboardSession, PortalPointerSession,
+    ScrollDirection,
 };
 use crate::screenshot::{capture_screenshot, ScreenshotCapture};
 use crate::windowing::registry;
@@ -38,6 +40,7 @@ use std::{
 pub struct ComputerUseLinux {
     last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
+    portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
 }
 
 #[tool_router]
@@ -661,6 +664,67 @@ impl ComputerUseLinux {
                 });
             }
         };
+        if self.should_prefer_kde_clipboard_text_backend() {
+            match self.ensure_portal_keyboard_session().await {
+                Ok(Some(session)) => {
+                    match run_kde_clipboard_paste_text(&session, &params.text).await {
+                        Ok(()) => {
+                            return Json(successful_action_with_focus(
+                                "type_text",
+                                "Action pasted through KDE clipboard integration.",
+                                received,
+                                focus,
+                            ));
+                        }
+                        Err(error) => {
+                            self.clear_portal_keyboard_session();
+                            return Json(action_result_with_focus(
+                                "type_text",
+                                Err(error),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Json(action_result_with_focus(
+                        "type_text",
+                        Err(format!("{error:#}")),
+                        received,
+                        focus,
+                    ));
+                }
+            }
+        }
+        if self.should_prefer_portal_keyboard_backend() {
+            if let Ok(keysyms) = keysyms_for_text(&params.text) {
+                match self.ensure_portal_keyboard_session().await {
+                    Ok(Some(session)) => match type_text_with_keysyms(&session, &keysyms).await {
+                        Ok(()) => {
+                            return Json(successful_action_with_focus(
+                                "type_text",
+                                "Action sent through the remote desktop portal.",
+                                received,
+                                focus,
+                            ));
+                        }
+                        Err(error) => {
+                            self.clear_portal_keyboard_session();
+                            return Json(action_result_with_focus(
+                                "type_text",
+                                Err(format!("{error:#}")),
+                                received,
+                                focus,
+                            ));
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(_) => {}
+                }
+            }
+        }
         let result = run_ydotool_type_text(&params.text).map(|output| vec![output]);
         Json(action_result_with_focus(
             "type_text",
@@ -674,7 +738,7 @@ impl ComputerUseLinux {
 #[tool_handler(
     name = "codex-computer-use-linux",
     version = "0.1.0",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, and send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available or through ydotool otherwise. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, and send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -1030,14 +1094,42 @@ struct ActionOutput {
 }
 
 impl ComputerUseLinux {
+    fn is_wayland_session(&self) -> bool {
+        crate::diagnostics::hydrate_session_bus_env();
+        env::var("XDG_SESSION_TYPE")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
+    }
+
     fn should_prefer_portal_pointer_backend(&self) -> bool {
         env::var("CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER")
             .ok()
             .as_deref()
             != Some("1")
-            && env::var("XDG_SESSION_TYPE")
-                .ok()
-                .is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
+            && self.is_wayland_session()
+    }
+
+    fn should_prefer_portal_keyboard_backend(&self) -> bool {
+        env::var("CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD")
+            .ok()
+            .as_deref()
+            != Some("1")
+            && self.is_wayland_session()
+            && !self.is_kde_wayland_session()
+    }
+
+    fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
+        env::var("CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD")
+            .ok()
+            .as_deref()
+            != Some("1")
+            && self.is_kde_wayland_session()
+    }
+
+    fn is_kde_wayland_session(&self) -> bool {
+        self.is_wayland_session()
+            && (env_contains("XDG_CURRENT_DESKTOP", "kde")
+                || env_contains("DESKTOP_SESSION", "plasma"))
     }
 
     fn cached_portal_pointer_session(&self) -> Option<PortalPointerSession> {
@@ -1053,6 +1145,19 @@ impl ComputerUseLinux {
         }
     }
 
+    fn cached_portal_keyboard_session(&self) -> Option<PortalKeyboardSession> {
+        self.portal_keyboard_session
+            .lock()
+            .ok()
+            .and_then(|cached| cached.clone())
+    }
+
+    fn clear_portal_keyboard_session(&self) {
+        if let Ok(mut cached) = self.portal_keyboard_session.lock() {
+            *cached = None;
+        }
+    }
+
     async fn ensure_portal_pointer_session(&self) -> Result<Option<PortalPointerSession>> {
         if !self.should_prefer_portal_pointer_backend() {
             return Ok(None);
@@ -1063,6 +1168,26 @@ impl ComputerUseLinux {
 
         let session = start_portal_pointer_session().await?;
         if let Ok(mut cached) = self.portal_pointer_session.lock() {
+            *cached = Some(session.clone());
+        }
+        Ok(Some(session))
+    }
+
+    async fn ensure_portal_keyboard_session(&self) -> Result<Option<PortalKeyboardSession>> {
+        if env::var("CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD")
+            .ok()
+            .as_deref()
+            == Some("1")
+            || !self.is_wayland_session()
+        {
+            return Ok(None);
+        }
+        if let Some(session) = self.cached_portal_keyboard_session() {
+            return Ok(Some(session));
+        }
+
+        let session = start_portal_keyboard_session().await?;
+        if let Ok(mut cached) = self.portal_keyboard_session.lock() {
             *cached = Some(session.clone());
         }
         Ok(Some(session))
@@ -1726,6 +1851,12 @@ fn trimmed_nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn env_contains(key: &str, needle: &str) -> bool {
+    env::var(key)
+        .ok()
+        .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+}
+
 fn action_result(
     action: &str,
     result: std::result::Result<Vec<Output>, String>,
@@ -1755,7 +1886,28 @@ fn action_result_with_focus(
     received: Option<serde_json::Value>,
     focus: Option<WindowFocusResult>,
 ) -> ActionOutput {
-    let mut output = action_result(action, result, received);
+    with_focus_context(action_result(action, result, received), focus)
+}
+
+fn successful_action_with_focus(
+    action: &str,
+    message: &str,
+    received: Option<serde_json::Value>,
+    focus: Option<WindowFocusResult>,
+) -> ActionOutput {
+    with_focus_context(
+        ActionOutput {
+            ok: true,
+            implemented: true,
+            action: action.to_string(),
+            message: message.to_string(),
+            received,
+        },
+        focus,
+    )
+}
+
+fn with_focus_context(mut output: ActionOutput, focus: Option<WindowFocusResult>) -> ActionOutput {
     if output.ok {
         if let Some(focus) = focus {
             let verification = if focus.exact_window_focused {
@@ -1887,12 +2039,66 @@ fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
     }
 }
 
+async fn run_kde_clipboard_paste_text(
+    session: &PortalKeyboardSession,
+    text: &str,
+) -> std::result::Result<(), String> {
+    let previous = kde_clipboard_contents()?;
+    kde_set_clipboard_contents(text)?;
+
+    let paste_result = press_keycode_chord(session, &[29], 47)
+        .await
+        .map_err(|error| format!("{error:#}"));
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let restore_result = kde_set_clipboard_contents(&previous);
+
+    match (paste_result, restore_result) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(restore_error)) => Err(format!(
+            "text was pasted, but previous KDE clipboard contents could not be restored: {restore_error}"
+        )),
+        (Err(error), Err(restore_error)) => Err(format!(
+            "{error}; previous KDE clipboard contents could not be restored: {restore_error}"
+        )),
+    }
+}
+
+fn kde_clipboard_contents() -> std::result::Result<String, String> {
+    let output = run_qdbus6_klipper(&["getClipboardContents"])?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_string())
+}
+
+fn kde_set_clipboard_contents(text: &str) -> std::result::Result<Output, String> {
+    run_qdbus6_klipper(&["setClipboardContents", text])
+}
+
+fn run_qdbus6_klipper(args: &[&str]) -> std::result::Result<Output, String> {
+    let output = Command::new("qdbus6")
+        .args(["org.kde.klipper", "/klipper"])
+        .args(args)
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => Ok(output),
+        Ok(output) => Err(command_output_error("qdbus6", output)),
+        Err(error) => Err(format!("failed to run qdbus6: {error}")),
+    }
+}
+
 fn ydotool_output_error(output: Output) -> String {
+    command_output_error("ydotool", output)
+}
+
+fn command_output_error(command: &str, output: Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let detail = if stderr.is_empty() { stdout } else { stderr };
     if detail.is_empty() {
-        format!("ydotool exited with {}", output.status)
+        format!("{command} exited with {}", output.status)
     } else {
         detail
     }
@@ -2680,6 +2886,31 @@ mod tests {
         assert_eq!(
             key_sequence("Super"),
             Some(vec!["125:1".to_string(), "125:0".to_string()])
+        );
+    }
+
+    #[test]
+    fn key_sequence_keeps_shortcuts_and_navigation_on_raw_events() {
+        assert_eq!(
+            key_sequence("Ctrl+L"),
+            Some(vec![
+                "29:1".to_string(),
+                "38:1".to_string(),
+                "38:0".to_string(),
+                "29:0".to_string(),
+            ])
+        );
+        assert_eq!(
+            key_sequence("ArrowLeft"),
+            Some(vec!["105:1".to_string(), "105:0".to_string()])
+        );
+        assert_eq!(
+            key_sequence("Escape"),
+            Some(vec!["1:1".to_string(), "1:0".to_string()])
+        );
+        assert_eq!(
+            key_sequence("Enter"),
+            Some(vec!["28:1".to_string(), "28:0".to_string()])
         );
     }
 
