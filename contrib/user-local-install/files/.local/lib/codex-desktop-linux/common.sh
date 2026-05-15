@@ -34,7 +34,7 @@ load_install_config() {
     SOURCE_REPO_DIR="${SOURCE_REPO_DIR:-${REPO_DIR:-$REPO_DIR_DEFAULT}}"
     REPO_DIR="$SOURCE_REPO_DIR"
     MANAGED_REPO_DIR="${MANAGED_REPO_DIR:-${DATA_DIR}/managed-repo}"
-    REPO_DEFAULT_BRANCH="${REPO_DEFAULT_BRANCH:-main}"
+    REPO_DEFAULT_BRANCH="${REPO_DEFAULT_BRANCH-}"
 }
 
 load_metadata() {
@@ -66,6 +66,11 @@ current_repo_head() {
     git -C "$repo_dir" rev-parse HEAD
 }
 
+source_repo_head() {
+    [ -d "$SOURCE_REPO_DIR/.git" ] || return 1
+    git -C "$SOURCE_REPO_DIR" rev-parse HEAD
+}
+
 remote_repo_head() {
     local origin_url
     origin_url="$(repo_origin_url)" || return 1
@@ -84,6 +89,17 @@ repo_origin_url() {
     return 1
 }
 
+repo_branch_from_origin_head() {
+    local repo_dir="$1"
+    local branch=""
+
+    [ -d "$repo_dir/.git" ] || return 1
+    branch="$(git -C "$repo_dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    branch="${branch#origin/}"
+    [ -n "$branch" ] || return 1
+    printf '%s\n' "$branch"
+}
+
 repo_default_branch() {
     local branch="${REPO_DEFAULT_BRANCH:-}"
     if [ -n "$branch" ] && [ "$branch" != "origin/HEAD" ]; then
@@ -91,21 +107,95 @@ repo_default_branch() {
         return 0
     fi
 
-    if [ -d "$SOURCE_REPO_DIR/.git" ]; then
-        branch="$(git -C "$SOURCE_REPO_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
-        branch="${branch#origin/}"
-        if [ -n "$branch" ]; then
-            printf '%s\n' "$branch"
-            return 0
-        fi
+    if branch="$(repo_branch_from_origin_head "$SOURCE_REPO_DIR" 2>/dev/null)"; then
+        printf '%s\n' "$branch"
+        return 0
+    fi
+
+    if branch="$(repo_branch_from_origin_head "$MANAGED_REPO_DIR" 2>/dev/null)"; then
+        printf '%s\n' "$branch"
+        return 0
     fi
 
     printf '%s\n' "main"
 }
 
-source_repo_has_overlay() {
+source_repo_overlay_base_ref() {
+    local upstream_ref current_branch default_branch
+
     [ -d "$SOURCE_REPO_DIR/.git" ] || return 1
+
+    upstream_ref="$(git -C "$SOURCE_REPO_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+    if [ -n "$upstream_ref" ] && git -C "$SOURCE_REPO_DIR" rev-parse --verify --quiet "$upstream_ref" >/dev/null; then
+        printf '%s\n' "$upstream_ref"
+        return 0
+    fi
+
+    current_branch="$(git -C "$SOURCE_REPO_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    if [ -n "$current_branch" ] && git -C "$SOURCE_REPO_DIR" rev-parse --verify --quiet "refs/remotes/origin/$current_branch" >/dev/null; then
+        printf 'origin/%s\n' "$current_branch"
+        return 0
+    fi
+
+    default_branch="$(repo_default_branch)"
+    if git -C "$SOURCE_REPO_DIR" rev-parse --verify --quiet "refs/remotes/origin/$default_branch" >/dev/null; then
+        printf 'origin/%s\n' "$default_branch"
+        return 0
+    fi
+
+    return 1
+}
+
+source_repo_overlay_paths() {
+    local diff_filter="$1"
+    local base_ref="${2:-}"
+
+    if [ -n "$base_ref" ]; then
+        {
+            git -C "$SOURCE_REPO_DIR" diff --name-only --diff-filter="$diff_filter" "$base_ref...HEAD" --
+            git -C "$SOURCE_REPO_DIR" diff --name-only --diff-filter="$diff_filter" HEAD --
+        } | awk 'NF && !seen[$0]++'
+        return 0
+    fi
+
+    git -C "$SOURCE_REPO_DIR" diff --name-only --diff-filter="$diff_filter" HEAD --
+}
+
+source_repo_has_overlay() {
+    local base_ref=""
+
+    [ -d "$SOURCE_REPO_DIR/.git" ] || return 1
+    base_ref="$(source_repo_overlay_base_ref 2>/dev/null || true)"
+
+    if [ -n "$base_ref" ] && ! git -C "$SOURCE_REPO_DIR" diff --quiet --no-ext-diff "$base_ref...HEAD" --; then
+        return 0
+    fi
+
     ! git -C "$SOURCE_REPO_DIR" diff --quiet --no-ext-diff HEAD --
+}
+
+source_repo_overlay_signature() {
+    local base_ref=""
+
+    [ -d "$SOURCE_REPO_DIR/.git" ] || return 0
+    base_ref="$(source_repo_overlay_base_ref 2>/dev/null || true)"
+
+    if [ -z "$base_ref" ] && git -C "$SOURCE_REPO_DIR" diff --quiet --no-ext-diff HEAD --; then
+        return 0
+    fi
+
+    if [ -n "$base_ref" ] && git -C "$SOURCE_REPO_DIR" diff --quiet --no-ext-diff "$base_ref...HEAD" -- && git -C "$SOURCE_REPO_DIR" diff --quiet --no-ext-diff HEAD --; then
+        return 0
+    fi
+
+    {
+        printf 'base_ref=%s\n' "$base_ref"
+        if [ -n "$base_ref" ]; then
+            git -C "$SOURCE_REPO_DIR" diff --binary "$base_ref...HEAD" --
+        fi
+        printf '\n--worktree--\n'
+        git -C "$SOURCE_REPO_DIR" diff --binary HEAD --
+    } | sha256sum | awk '{ print $1 }'
 }
 
 ensure_managed_repo() {
@@ -125,8 +215,9 @@ ensure_managed_repo() {
 }
 
 apply_source_overlay() {
-    local path target_path
+    local path target_path base_ref
     source_repo_has_overlay || return 0
+    base_ref="$(source_repo_overlay_base_ref 2>/dev/null || true)"
 
     while IFS= read -r path; do
         [ -n "$path" ] || continue
@@ -134,12 +225,12 @@ apply_source_overlay() {
         mkdir -p "$(dirname "$target_path")"
         rm -rf "$target_path"
         cp -a "$SOURCE_REPO_DIR/$path" "$target_path"
-    done < <(git -C "$SOURCE_REPO_DIR" diff --name-only --diff-filter=ACMRTUXB HEAD --)
+    done < <(source_repo_overlay_paths "ACMRTUXB" "$base_ref")
 
     while IFS= read -r path; do
         [ -n "$path" ] || continue
         rm -rf "$MANAGED_REPO_DIR/$path"
-    done < <(git -C "$SOURCE_REPO_DIR" diff --name-only --diff-filter=D HEAD --)
+    done < <(source_repo_overlay_paths "D" "$base_ref")
 }
 
 prepare_build_repo() {
@@ -202,7 +293,7 @@ record_metadata() {
     ensure_layout
     load_install_config
 
-    local build_repo_dir repo_head dmg_sha256 dmg_size electron_version dmg_headers dmg_etag dmg_last_modified dmg_content_length build_time repo_origin
+    local build_repo_dir repo_head source_repo_head_value source_overlay_sha dmg_sha256 dmg_size electron_version dmg_headers dmg_etag dmg_last_modified dmg_content_length build_time repo_origin
     build_repo_dir="$(effective_repo_dir)"
 
     if [ -d "$build_repo_dir/.git" ]; then
@@ -216,6 +307,8 @@ record_metadata() {
     dmg_size="$(stat -c '%s' "$DMG_FILE")"
     electron_version="$(cat "$APP_DIR/version")"
     build_time="$(date -Iseconds)"
+    source_repo_head_value="$(source_repo_head 2>/dev/null || true)"
+    source_overlay_sha="$(source_repo_overlay_signature 2>/dev/null || true)"
 
     dmg_headers="$(remote_dmg_headers 2>/dev/null || true)"
     dmg_etag="$(header_value "$dmg_headers" "etag")"
@@ -226,6 +319,8 @@ record_metadata() {
         write_kv BUILD_TIME "$build_time"
         write_kv REPO_ORIGIN "$repo_origin"
         write_kv REPO_HEAD "$repo_head"
+        write_kv SOURCE_REPO_HEAD "$source_repo_head_value"
+        write_kv SOURCE_OVERLAY_SHA256 "$source_overlay_sha"
         write_kv DMG_SHA256 "$dmg_sha256"
         write_kv DMG_SIZE "$dmg_size"
         write_kv DMG_ETAG "$dmg_etag"

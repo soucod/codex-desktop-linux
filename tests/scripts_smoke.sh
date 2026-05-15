@@ -2622,6 +2622,134 @@ test_webview_probe_equivalence() {
         || fail "webview probe equivalence harness reported a verdict mismatch or unbounded watchdog"
 }
 
+test_user_local_prepare_build_repo_overlays_committed_local_changes() {
+    info "Checking user-local managed checkout preserves committed local overlay changes"
+    local workspace="$TMP_DIR/user-local-overlay"
+    local origin_repo="$workspace/origin.git"
+    local source_repo="$workspace/source"
+    local upstream_repo="$workspace/upstream"
+    local managed_repo="$workspace/xdg-data/codex-desktop-linux/managed-repo"
+    local install_env="$workspace/install.env"
+
+    mkdir -p "$workspace"
+    git init --bare --initial-branch=main "$origin_repo" >/dev/null
+    git clone "$origin_repo" "$source_repo" >/dev/null 2>&1
+    git -C "$source_repo" config user.name "Smoke Test"
+    git -C "$source_repo" config user.email "smoke@example.com"
+
+    cat > "$source_repo/tracked.txt" <<'EOF'
+base
+EOF
+    cat > "$source_repo/upstream.txt" <<'EOF'
+upstream-base
+EOF
+    git -C "$source_repo" add tracked.txt upstream.txt
+    git -C "$source_repo" commit -m "base" >/dev/null
+    git -C "$source_repo" push -u origin main >/dev/null
+    git -C "$source_repo" remote set-head origin -a >/dev/null 2>&1 || true
+
+    cat > "$source_repo/tracked.txt" <<'EOF'
+local-overlay
+EOF
+    git -C "$source_repo" commit -am "local overlay" >/dev/null
+
+    git clone "$origin_repo" "$upstream_repo" >/dev/null 2>&1
+    git -C "$upstream_repo" config user.name "Smoke Test"
+    git -C "$upstream_repo" config user.email "smoke@example.com"
+    cat > "$upstream_repo/upstream.txt" <<'EOF'
+upstream-advanced
+EOF
+    cat > "$upstream_repo/remote-only.txt" <<'EOF'
+remote-only
+EOF
+    git -C "$upstream_repo" add upstream.txt remote-only.txt
+    git -C "$upstream_repo" commit -m "upstream advance" >/dev/null
+    git -C "$upstream_repo" push origin main >/dev/null
+
+    (
+        export HOME="$workspace/home"
+        export XDG_DATA_HOME="$workspace/xdg-data"
+        export XDG_STATE_HOME="$workspace/xdg-state"
+        mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh"
+
+        INSTALL_CONFIG_FILE="$install_env"
+        cat > "$INSTALL_CONFIG_FILE" <<EOF
+SOURCE_REPO_DIR=$(printf '%q' "$source_repo")
+MANAGED_REPO_DIR=$(printf '%q' "$managed_repo")
+REPO_ORIGIN_URL=$(printf '%q' "$origin_repo")
+REPO_DEFAULT_BRANCH=$(printf '%q' "main")
+OPT_ROOT=$(printf '%q' "$workspace/opt")
+EOF
+
+        prepare_build_repo
+
+        [ "$(git -C "$MANAGED_REPO_DIR" rev-parse HEAD)" = "$(git -C "$upstream_repo" rev-parse HEAD)" ] \
+            || fail "Expected managed checkout to reset to latest upstream commit"
+        [ "$(cat "$MANAGED_REPO_DIR/tracked.txt")" = "local-overlay" ] \
+            || fail "Expected committed local overlay change to be copied into managed checkout"
+        [ "$(cat "$MANAGED_REPO_DIR/upstream.txt")" = "upstream-advanced" ] \
+            || fail "Expected upstream-only change to remain intact in managed checkout"
+        [ "$(cat "$MANAGED_REPO_DIR/remote-only.txt")" = "remote-only" ] \
+            || fail "Expected upstream-only added file to remain in managed checkout"
+        [ -n "$(source_repo_overlay_signature)" ] \
+            || fail "Expected committed local overlay to produce a non-empty overlay signature"
+    )
+}
+
+test_user_local_prepare_build_repo_detects_default_branch_without_recorded_branch() {
+    info "Checking user-local managed checkout detects remote default branch when metadata leaves it empty"
+    local workspace="$TMP_DIR/user-local-branch-detect"
+    local origin_repo="$workspace/origin.git"
+    local source_repo="$workspace/source"
+    local unmanaged_source="$workspace/source-without-git"
+    local managed_repo="$workspace/xdg-data/codex-desktop-linux/managed-repo"
+    local install_env="$workspace/install.env"
+
+    mkdir -p "$workspace" "$unmanaged_source"
+    git init --bare --initial-branch=master "$origin_repo" >/dev/null
+    git clone "$origin_repo" "$source_repo" >/dev/null 2>&1
+    git -C "$source_repo" config user.name "Smoke Test"
+    git -C "$source_repo" config user.email "smoke@example.com"
+    cat > "$source_repo/branch.txt" <<'EOF'
+master-branch
+EOF
+    git -C "$source_repo" add branch.txt
+    git -C "$source_repo" commit -m "base" >/dev/null
+    git -C "$source_repo" push -u origin master >/dev/null
+    git -C "$source_repo" remote set-head origin -a >/dev/null 2>&1 || true
+
+    (
+        export HOME="$workspace/home"
+        export XDG_DATA_HOME="$workspace/xdg-data"
+        export XDG_STATE_HOME="$workspace/xdg-state"
+        mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh"
+
+        INSTALL_CONFIG_FILE="$install_env"
+        cat > "$INSTALL_CONFIG_FILE" <<EOF
+SOURCE_REPO_DIR=$(printf '%q' "$unmanaged_source")
+MANAGED_REPO_DIR=$(printf '%q' "$managed_repo")
+REPO_ORIGIN_URL=$(printf '%q' "$origin_repo")
+REPO_DEFAULT_BRANCH=$(printf '%q' "")
+OPT_ROOT=$(printf '%q' "$workspace/opt")
+EOF
+
+        prepare_build_repo
+
+        [ "$(repo_default_branch)" = "master" ] \
+            || fail "Expected default branch detection to resolve to the remote master branch"
+        [ "$(git -C "$MANAGED_REPO_DIR" rev-parse --abbrev-ref HEAD)" = "master" ] \
+            || fail "Expected managed checkout to land on the detected master branch"
+        [ "$(cat "$MANAGED_REPO_DIR/branch.txt")" = "master-branch" ] \
+            || fail "Expected managed checkout contents from the detected master branch"
+    )
+}
+
 main() {
     test_common_helper_sourcing
     test_deb_builder_smoke
@@ -2659,6 +2787,8 @@ main() {
     test_linux_computer_use_gate_patch_smoke
     test_linux_computer_use_ui_opt_in_smoke
     test_linux_file_manager_patch_fails_soft
+    test_user_local_prepare_build_repo_overlays_committed_local_changes
+    test_user_local_prepare_build_repo_detects_default_branch_without_recorded_branch
     info "All script smoke tests passed"
 }
 

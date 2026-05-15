@@ -44,17 +44,19 @@ repo_origin_url() {
     fi
 }
 
-repo_default_branch() {
+detected_repo_default_branch() {
     local branch=""
     if [ -d "${SOURCE_REPO_ROOT}/.git" ]; then
         branch="$(git -C "$SOURCE_REPO_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
         branch="${branch#origin/}"
+        if [ -z "$branch" ]; then
+            branch="$(git -C "$SOURCE_REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+            if [ -n "$branch" ] && ! git -C "$SOURCE_REPO_ROOT" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
+                branch=""
+            fi
+        fi
     fi
-    if [ -n "$branch" ]; then
-        printf '%s\n' "$branch"
-    else
-        printf '%s\n' "main"
-    fi
+    printf '%s\n' "$branch"
 }
 
 install_manager_files() {
@@ -98,7 +100,7 @@ REPO_DIR=$(printf '%q' "$SOURCE_REPO_ROOT")
 SOURCE_REPO_DIR=$(printf '%q' "$SOURCE_REPO_ROOT")
 MANAGED_REPO_DIR=$(printf '%q' "$MANAGED_REPO_DIR")
 REPO_ORIGIN_URL=$(printf '%q' "$(repo_origin_url)")
-REPO_DEFAULT_BRANCH=$(printf '%q' "$(repo_default_branch)")
+REPO_DEFAULT_BRANCH=$(printf '%q' "$(detected_repo_default_branch)")
 OPT_ROOT=$(printf '%q' "$OPT_ROOT")
 EOF
 
