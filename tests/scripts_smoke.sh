@@ -1490,6 +1490,12 @@ PY
     assert_contains "$REPO_DIR/packaging/linux/codex-desktop.desktop" "codex-update-manager install-ready"
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/share/applications/codex-desktop.desktop" "@HOME@/.local/bin/codex-desktop %U"
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/share/applications/codex-desktop.desktop" "MimeType=x-scheme-handler/codex;x-scheme-handler/codex-browser-sidebar;"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" "CODEX_USER_LOCAL_OZONE_PLATFORM"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" 'exec "${APP_DIR}/start.sh" --x11 "$@"'
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" 'exec "${APP_DIR}/start.sh" --wayland "$@"'
+    assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "--force-x11"
+    assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "user-local.env"
+    assert_contains "$REPO_DIR/contrib/user-local-install/README.md" "--force-x11"
 }
 
 test_side_by_side_launcher_identity() {
@@ -3296,6 +3302,49 @@ SCRIPT
     assert_file_exists "$marker"
 }
 
+test_user_local_install_preserves_persisted_x11_preference_on_refresh() {
+    info "Checking user-local X11 fallback preference persists across helper refreshes"
+    local workspace="$TMP_DIR/user-local-x11-preference"
+    local stub_bin="$workspace/bin"
+    local home="$workspace/home"
+    local config_home="$workspace/config"
+    local preference_file="$config_home/codex-desktop-linux/user-local.env"
+
+    mkdir -p "$stub_bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_bin/7z"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_bin/systemctl"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_bin/update-desktop-database"
+    chmod +x "$stub_bin/7z" "$stub_bin/systemctl" "$stub_bin/update-desktop-database"
+
+    PATH="$stub_bin:$PATH" \
+        HOME="$home" \
+        XDG_CONFIG_HOME="$config_home" \
+        XDG_DATA_HOME="$workspace/data" \
+        XDG_STATE_HOME="$workspace/state" \
+        CODEX_USER_LOCAL_SOURCE_REPO_DIR="$REPO_DIR" \
+        bash "$REPO_DIR/contrib/user-local-install/install-user-local.sh" --force-x11 >/dev/null
+    assert_file_exists "$preference_file"
+    assert_contains "$preference_file" "CODEX_USER_LOCAL_OZONE_PLATFORM=x11"
+
+    PATH="$stub_bin:$PATH" \
+        HOME="$home" \
+        XDG_CONFIG_HOME="$config_home" \
+        XDG_DATA_HOME="$workspace/data" \
+        XDG_STATE_HOME="$workspace/state" \
+        CODEX_USER_LOCAL_SOURCE_REPO_DIR="$REPO_DIR" \
+        bash "$REPO_DIR/contrib/user-local-install/install-user-local.sh" --from-update >/dev/null
+    assert_contains "$preference_file" "CODEX_USER_LOCAL_OZONE_PLATFORM=x11"
+
+    PATH="$stub_bin:$PATH" \
+        HOME="$home" \
+        XDG_CONFIG_HOME="$config_home" \
+        XDG_DATA_HOME="$workspace/data" \
+        XDG_STATE_HOME="$workspace/state" \
+        CODEX_USER_LOCAL_SOURCE_REPO_DIR="$REPO_DIR" \
+        bash "$REPO_DIR/contrib/user-local-install/install-user-local.sh" --no-force-x11 >/dev/null
+    assert_contains "$preference_file" "CODEX_USER_LOCAL_OZONE_PLATFORM=auto"
+}
+
 test_user_local_prepare_build_repo_updates_existing_single_branch_fetch_refspec() {
     info "Checking user-local managed checkout can switch branches after a single-branch clone"
     local workspace="$TMP_DIR/user-local-single-branch-refspec"
@@ -3596,6 +3645,7 @@ main() {
     test_user_local_prepare_build_repo_ignores_stale_recorded_default_branch
     test_user_local_prepare_build_repo_ignores_stale_source_origin_head
     test_user_local_install_from_update_defers_record_only_metadata
+    test_user_local_install_preserves_persisted_x11_preference_on_refresh
     test_user_local_prepare_build_repo_updates_existing_single_branch_fetch_refspec
     test_user_local_prepare_build_repo_handles_deleted_overlay_paths
     test_user_local_prepare_build_repo_removes_rename_source_paths
