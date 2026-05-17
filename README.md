@@ -111,6 +111,18 @@ nix run github:ilysenko/codex-desktop-linux#computer-use-ui-remote-mobile-contro
 
 `nix develop github:ilysenko/codex-desktop-linux` enters a dev shell with the required tooling.
 
+### Cachix binary cache
+
+CI can populate a Cachix cache named `codex-desktop-linux` for the flake package outputs. To enable pushes, create that cache in Cachix and add a repository secret named `CACHIX_AUTH_TOKEN` with write access to the cache.
+
+After the cache exists, users can opt in locally with:
+
+```bash
+cachix use codex-desktop-linux
+```
+
+The scheduled `Populate Cachix` workflow builds the default Codex Desktop package, the feature-specific Nix package variants, and `.#installer`. The upstream-hash refresh workflow also uploads its verification build when the token is present.
+
 ## Linux Computer Use
 
 Linux Computer Use is an **opt-in** plugin that lets Codex inspect and control desktop apps on Linux through a native Rust MCP backend (`codex-computer-use-linux`). It is designed and maintained by [@avifenesh](https://github.com/avifenesh) and supports:
