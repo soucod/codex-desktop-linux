@@ -379,6 +379,8 @@ test("composer runtime appends one browser-side conversation controller", () => 
   assert.match(patched, /epoch/);
   assert.match(patched, /speechCooldownUntil/);
   assert.match(patched, /interruptPendingEpoch/);
+  assert.match(patched, /interruptSerial/);
+  assert.match(patched, /cancelInterruptMonitor/);
   assert.match(patched, /clearTimeout\(n\.timer\)/);
   assert.match(patched, /codexLinuxConversationToggle/);
   assert.match(patched, /codexLinuxConversationToggleMute/);
@@ -604,6 +606,50 @@ test("conversation runtime can mute the user microphone without exiting", () => 
     runTimer(timers, (timer) => timer.delay === 0, "unmuted listening restart");
     assert.equal(startCount, 2);
   }, { document: fakeDocument });
+});
+
+test("conversation runtime unmutes into immediate listening after speech cooldown", () => {
+  const fakeDocument = createFakeDocument();
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 1_000_000;
+    withConversationRuntime(({ events, timers }) => {
+      let startCount = 0;
+      const controls = {
+        conversationId: "thread-a",
+        isResponseInProgress: false,
+        startDictation() {
+          startCount++;
+        },
+        stopDictation() {},
+        onStop() {},
+      };
+
+      assert.equal(globalThis.codexLinuxConversationToggle(controls), true);
+      runTimer(timers, (timer) => timer.delay === 0, "initial listening restart");
+      assert.equal(startCount, 1);
+
+      assert.equal(globalThis.codexLinuxConversationShouldSendTranscript("Please answer once.", "send"), true);
+      const spoken = "Short answer creates cooldown.";
+      globalThis.codexLinuxConversationAssistant({ completed: true }, spoken, "thread-a", "turn-one", false);
+      assert.deepEqual(
+        fetchBodies(events)
+          .filter((body) => body.action === "speak")
+          .map((body) => body.text),
+        [spoken],
+      );
+      runTimer(timers, (timer) => timer.delay > 2200 && timer.delay < 4000, "speech completion");
+
+      assert.equal(globalThis.codexLinuxConversationToggleMute(true), true);
+      assert.equal(globalThis.codexLinuxConversationToggleMute(false), true);
+      assert.equal(fakeDocument.bodyClassList.contains("codex-linux-conversation-muted"), false);
+
+      runTimer(timers, (timer) => timer.delay === 0, "unmuted listening restart");
+      assert.equal(startCount, 2);
+    }, { document: fakeDocument });
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("conversation runtime ignores completed assistant messages seen before the active stream", () => {
@@ -1325,6 +1371,80 @@ test("conversation runtime opens one pending interrupt monitor stream", () => {
     assert.equal(stoppedTracks, 0);
 
     assert.equal(globalThis.codexLinuxConversationToggle(controls), true);
+    assert.equal(stoppedTracks, 1);
+  }, { AudioContext: FakeAudioContext, navigator });
+});
+
+test("conversation runtime invalidates pending interrupt monitors across mute toggles", () => {
+  let getUserMediaCalls = 0;
+  const pendingResolvers = [];
+  let stoppedTracks = 0;
+  const stream = {
+    getTracks() {
+      return [
+        {
+          stop() {
+            stoppedTracks++;
+          },
+        },
+      ];
+    },
+  };
+  const navigator = {
+    userAgent: "Codex Desktop Linux",
+    mediaDevices: {
+      getUserMedia() {
+        getUserMediaCalls++;
+        return {
+          then(resolve) {
+            pendingResolvers.push(resolve);
+            return {
+              catch() {},
+            };
+          },
+        };
+      },
+    },
+  };
+  class FakeAudioContext {
+    createMediaStreamSource() {
+      return {
+        connect() {},
+        disconnect() {},
+      };
+    }
+    createAnalyser() {
+      return {
+        fftSize: 0,
+        getFloatTimeDomainData(data) {
+          data.fill(0);
+        },
+      };
+    }
+    close() {}
+  }
+
+  withConversationRuntime(() => {
+    const controls = {
+      conversationId: "thread-a",
+      isResponseInProgress: false,
+      startDictation() {},
+      stopDictation() {},
+      onStop() {},
+    };
+
+    assert.equal(globalThis.codexLinuxConversationToggle(controls), true);
+    assert.equal(globalThis.codexLinuxConversationShouldSendTranscript("Start a monitor-protected response.", "send"), true);
+    assert.equal(globalThis.codexLinuxConversationSync("thread-a", { ...controls, isResponseInProgress: true }), true);
+    assert.equal(getUserMediaCalls, 1);
+
+    assert.equal(globalThis.codexLinuxConversationToggleMute(true), true);
+    assert.equal(globalThis.codexLinuxConversationToggleMute(false), true);
+    assert.equal(getUserMediaCalls, 2);
+
+    pendingResolvers[0](stream);
+    assert.equal(stoppedTracks, 1);
+    pendingResolvers[1](stream);
     assert.equal(stoppedTracks, 1);
   }, { AudioContext: FakeAudioContext, navigator });
 });
