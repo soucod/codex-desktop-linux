@@ -218,12 +218,13 @@ Default launch keeps Electron GPU enabled and lets Electron choose the platform.
 Extra flags are passed directly to Electron.
 
 Environment:
-  CODEX_LINUX_RENDERING_MODE=auto|default|wslg
-                              Auto-detect WSLg, keep generic Linux defaults, or force the WSLg profile
+  CODEX_LINUX_RENDERING_MODE=auto|default|wslg|wayland-gpu
+                              Auto-detect WSLg, keep generic Linux defaults, force the WSLg profile,
+                              or force native Wayland with GPU compositing enabled
   CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0|1
                               Set to 1 to add --disable-gpu-compositing for flicker workarounds
   CODEX_FORCE_RENDERER_ACCESSIBILITY=auto|0|1
-                              Override --force-renderer-accessibility; auto skips it under WSLg
+                              Override --force-renderer-accessibility; auto skips it under WSLg and wayland-gpu
   CODEX_MULTI_LAUNCH=1        Treat normal launches like --new-instance
   CODEX_MULTI_LAUNCH_PORT_RANGE=START-END
                               Port allocation range for --new-instance (default: CODEX_WEBVIEW_PORT through +4)
@@ -1735,7 +1736,7 @@ is_wslg_session() {
 
 normalize_linux_rendering_mode() {
     case "${CODEX_LINUX_RENDERING_MODE:-auto}" in
-        auto|default|wslg)
+        auto|default|wslg|wayland-gpu)
             echo "${CODEX_LINUX_RENDERING_MODE:-auto}"
             ;;
         *)
@@ -1797,6 +1798,13 @@ apply_electron_rendering_profile() {
         default)
             return 0
             ;;
+        wayland-gpu)
+            if [ "$ELECTRON_PLATFORM_EXPLICIT" -eq 0 ] && [ "$ELECTRON_OZONE_SWITCH_IN_ARGS" -eq 0 ]; then
+                ELECTRON_OZONE_PLATFORM="wayland"
+                ELECTRON_OZONE_HINT=""
+            fi
+            return 0
+            ;;
     esac
 
     [ "$ELECTRON_RENDERING_MODE" = "wslg" ] || return 0
@@ -1847,7 +1855,13 @@ should_force_renderer_accessibility() {
         esac
     fi
 
-    [ "$ELECTRON_RENDERING_MODE" != "wslg" ]
+    case "$ELECTRON_RENDERING_MODE" in
+        wslg|wayland-gpu)
+            return 1
+            ;;
+    esac
+
+    return 0
 }
 
 set_electron_defaults() {
