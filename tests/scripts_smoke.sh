@@ -1191,7 +1191,7 @@ test_setup_native_wizard_accepts_numbered_feature_selection() {
             printf '\n'
             printf '\n'
             printf '\n'
-        } | script -qefc "bash $REPO_DIR/scripts/bootstrap-wizard.sh" /dev/null >"$output_log"
+        } | script -qefc "CODEX_BOOTSTRAP_NO_GUI=1 bash $REPO_DIR/scripts/bootstrap-wizard.sh" /dev/null >"$output_log"
     )
 
     assert_json_enabled_equals "$config" '["conversation-mode","read-aloud","read-aloud-mcp"]'
@@ -1600,7 +1600,7 @@ test_setup_native_wizard_blank_interactive_cleanup_ids_skip_cleanup() {
             printf '\n'
             printf '\n'
             printf '\n'
-        } | script -qefc "bash $REPO_DIR/scripts/bootstrap-wizard.sh" /dev/null >"$output_log"
+        } | script -qefc "CODEX_BOOTSTRAP_NO_GUI=1 bash $REPO_DIR/scripts/bootstrap-wizard.sh" /dev/null >"$output_log"
     )
 
     assert_json_enabled_equals "$config" '["remote-mobile-control"]'
@@ -1639,7 +1639,7 @@ test_setup_native_wizard_dry_run_cleanup_does_not_delete_confirmed_paths() {
             printf '\n'
             printf '\n'
             printf 'DELETE %s\n' "$key_file"
-        } | script -qefc "bash $REPO_DIR/scripts/bootstrap-wizard.sh" /dev/null >"$output_log"
+        } | script -qefc "CODEX_BOOTSTRAP_NO_GUI=1 bash $REPO_DIR/scripts/bootstrap-wizard.sh" /dev/null >"$output_log"
     )
 
     assert_file_exists "$key_file"
@@ -1686,7 +1686,7 @@ test_setup_native_wizard_cleanup_deletes_only_confirmed_paths() {
             printf '\n'
             printf '\n'
             printf '\n'
-        } | script -qefc "bash $REPO_DIR/scripts/bootstrap-wizard.sh" /dev/null >"$output_log"
+        } | script -qefc "CODEX_BOOTSTRAP_NO_GUI=1 bash $REPO_DIR/scripts/bootstrap-wizard.sh" /dev/null >"$output_log"
     )
 
     assert_file_not_exists "$key_file"
