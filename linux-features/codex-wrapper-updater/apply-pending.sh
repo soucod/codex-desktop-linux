@@ -14,6 +14,26 @@ truthy() {
     esac
 }
 
+prelaunch_timeout_seconds() {
+    local value="${CODEX_WRAPPER_UPDATER_PRELAUNCH_TIMEOUT_SECONDS:-5}"
+
+    case "$value" in
+        ""|*[!0-9]*)
+            log "invalid CODEX_WRAPPER_UPDATER_PRELAUNCH_TIMEOUT_SECONDS='${CODEX_WRAPPER_UPDATER_PRELAUNCH_TIMEOUT_SECONDS:-}'; using 5"
+            echo 5
+            return 0
+            ;;
+    esac
+
+    if [ "$value" -gt 300 ]; then
+        log "CODEX_WRAPPER_UPDATER_PRELAUNCH_TIMEOUT_SECONDS=$value is too high; using 300"
+        echo 300
+        return 0
+    fi
+
+    echo "$value"
+}
+
 resolve_app_id() {
     local candidate="${CODEX_LINUX_APP_ID:-${CODEX_APP_ID:-codex-desktop}}"
     case "$candidate" in
@@ -88,12 +108,34 @@ manager="$(resolve_update_manager)" || {
 }
 
 log "applying pending wrapper update via $manager"
-if "$manager" apply-wrapper-update; then
+apply_status=0
+if [ "$phase" = "prelaunch" ]; then
+    timeout_seconds="$(prelaunch_timeout_seconds)"
+    if [ "$timeout_seconds" -eq 0 ]; then
+        log "prelaunch wrapper update apply disabled; leaving marker for after-exit retry"
+        exit 0
+    fi
+    if ! command -v timeout >/dev/null 2>&1; then
+        log "timeout command is unavailable; skipping prelaunch wrapper update apply"
+        exit 0
+    fi
+    timeout "$timeout_seconds" "$manager" apply-wrapper-update
+    apply_status=$?
+else
+    "$manager" apply-wrapper-update
+    apply_status=$?
+fi
+
+if [ "$apply_status" -eq 0 ]; then
     rm -f "$marker"
     log "wrapper update applied"
     [ "$phase" = "after-exit" ] && relaunch_app success
 else
-    log "wrapper update apply failed; leaving marker for retry"
+    if [ "$phase" = "prelaunch" ] && [ "$apply_status" -eq 124 ]; then
+        log "prelaunch wrapper update apply timed out after ${timeout_seconds}s; leaving marker for after-exit retry"
+    else
+        log "wrapper update apply failed with status $apply_status; leaving marker for retry"
+    fi
     [ "$phase" = "after-exit" ] && relaunch_app failed
 fi
 

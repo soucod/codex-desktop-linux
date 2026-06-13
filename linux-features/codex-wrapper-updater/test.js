@@ -234,6 +234,32 @@ test("apply hook preserves marker on failure and clears it on success", () => {
   assert.equal(fs.existsSync(marker), false);
 });
 
+test("apply hook bounds slow prelaunch apply and preserves marker", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-wrapper-updater-timeout-"));
+  const markerDir = path.join(temp, "codex-wrapper-updater");
+  const marker = path.join(markerDir, "pending");
+  const manager = fakeManager(temp, "sleep 3\nexit 0\n");
+  fs.mkdirSync(markerDir, { recursive: true });
+  fs.writeFileSync(marker, "pending\n");
+
+  const started = Date.now();
+  const result = spawnSync("bash", [path.join(featureDir, "apply-pending.sh")], {
+    env: {
+      ...process.env,
+      CODEX_LINUX_APP_STATE_DIR: temp,
+      CODEX_LINUX_FEATURE_HOOK_PHASE: "prelaunch",
+      CODEX_UPDATE_MANAGER_PATH: manager,
+      CODEX_WRAPPER_UPDATER_PRELAUNCH_TIMEOUT_SECONDS: "1",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(marker), true);
+  assert.match(result.stdout, /prelaunch wrapper update apply timed out after 1s/);
+  assert.ok(Date.now() - started < 2500, "prelaunch apply should be bounded by timeout");
+});
+
 test("apply hook resolves marker from sanitized app id when app state dir is absent", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-wrapper-updater-xdg-"));
   const markerDir = path.join(temp, "codex-cua-lab", "codex-wrapper-updater");

@@ -2820,6 +2820,12 @@ multi_body = source.split("configure_multi_launch_instance() {", 1)[1].split('WE
 adopt_body = source.split("adopt_existing_webview_server() {", 1)[1].split("ensure_webview_server() {", 1)[0]
 ensure_body = source.split("ensure_webview_server() {", 1)[1].split("wait_for_webview_server", 1)[0]
 reconcile_body = source.split("reconcile_runtime_state() {", 1)[1].split("set_electron_defaults() {", 1)[0]
+lock_holder_body = source.split("launcher_lock_holder_pids() {", 1)[1].split("launcher_lock_holder_summary() {", 1)[0]
+orphan_body = source.split("pid_is_orphaned_runtime_process() {", 1)[1].split("detect_cross_install_conflict() {", 1)[0]
+reap_body = source.split("reap_orphaned_runtime_processes() {", 1)[1].split("reconcile_runtime_state() {", 1)[0]
+match_executable_body = source.split("pid_matches_executable() {", 1)[1].split("find_running_app_pid() {", 1)[0]
+foreign_body = source.split("pid_is_foreign_codex_electron() {", 1)[1].split("discover_running_app_pid() {", 1)[0]
+summary_body = source.split("pid_summary() {", 1)[1].split("pid_is_orphaned_runtime_process() {", 1)[0]
 if 'LAUNCHER_ARGS=()' not in source:
     raise SystemExit("launcher must keep a sanitized argv for launcher-only flags")
 if 'CODEX_LINUX_FEATURES_DIR="$SCRIPT_DIR/.codex-linux/features"' not in source:
@@ -2874,25 +2880,53 @@ if 'pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"' not in lau
     raise SystemExit("launch_electron must not overwrite APP_PID_FILE for second-instance handoff")
 if 'echo "$ELECTRON_PID" > "$APP_PID_FILE"' not in launch_body:
     raise SystemExit("launch_electron must still write APP_PID_FILE for normal cold launches")
+if "pid_cmdline_arg0_path" not in source:
+    raise SystemExit("launcher process discovery must use cmdline arg0 path rather than canonicalizing /proc exe paths")
+if "/proc/[0-9]*/exe" in source or 'readlink -f "/proc/$pid/exe"' in source or 'canonical_path "$SCRIPT_DIR/electron"' in source:
+    raise SystemExit("launcher process discovery must not scan or canonicalize /proc exe paths; autofs can block those stats")
+if match_executable_body.index('actual="$(pid_cmdline_arg0_path "$pid")"') > match_executable_body.index('pid_is_current_user "$pid"'):
+    raise SystemExit("launcher process discovery must check cmdline arg0 before reading /proc status for UID")
+if 'basename "$actual"' in foreign_body:
+    raise SystemExit("foreign Electron detection must not fork basename for every /proc candidate")
+if 'readlink "/proc/$pid/cwd"' in summary_body:
+    raise SystemExit("pid summaries in launcher hot paths must not readlink /proc cwd")
 electron_launch = '"$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"'
+electron_exec = 'exec "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"'
 warm_log = 'echo "Electron warm-start handoff:'
 normal_log = 'echo "Electron launch mode:'
 warm_log_pos = launch_body.index(warm_log)
 warm_unset_pos = launch_body.index("unset ELECTRON_RUN_AS_NODE", warm_log_pos)
 warm_launch_pos = launch_body.index(electron_launch, warm_unset_pos)
 normal_log_pos = launch_body.index(normal_log)
+normal_close_pos = launch_body.index("close_launcher_lock_fd_for_child", normal_log_pos)
 normal_unset_pos = launch_body.index("unset ELECTRON_RUN_AS_NODE", normal_log_pos)
-normal_launch_pos = launch_body.index(electron_launch + " &", normal_unset_pos)
-if not (warm_log_pos < warm_unset_pos < warm_launch_pos < normal_log_pos < normal_unset_pos < normal_launch_pos):
-    raise SystemExit("launch_electron must clear ELECTRON_RUN_AS_NODE immediately before each Electron launch")
+normal_launch_pos = launch_body.index(electron_exec, normal_unset_pos)
+if electron_launch + " &" in launch_body:
+    raise SystemExit("cold Electron launch must close launcher fd in a child before exec, not background the binary directly")
+if not (warm_log_pos < warm_unset_pos < warm_launch_pos < normal_log_pos < normal_close_pos < normal_unset_pos < normal_launch_pos):
+    raise SystemExit("launch_electron must close the launcher fd and clear ELECTRON_RUN_AS_NODE immediately before cold Electron exec")
 if "using_second_instance_handoff" not in source or "needs_cold_start" not in source:
     raise SystemExit("launcher must have an explicit second-instance handoff mode")
 if "second_instance_handoff_ready" not in runtime_body:
     raise SystemExit("second-instance handoff must skip cold-start setup")
 if "clear_bundled_marketplace_tmp_cache\nmonitor_bundled_marketplace_tmp_permissions\nreconcile_runtime_state" in runtime_body:
     raise SystemExit("warm-start path must not clear bundled marketplace temp cache")
-if not re.search(r'if needs_cold_start; then\s+clear_bundled_marketplace_tmp_cache\s+# The runtime marketplace is populated asynchronously.*?monitor_bundled_marketplace_tmp_permissions\s+sync_browser_use_bundled_plugin_cache\s+sync_chrome_bundled_plugin_cache\s+sync_computer_use_bundled_plugin_cache\s+sync_read_aloud_bundled_plugin_cache\s+run_cold_start_hooks\s+fi', runtime_body, re.S):
+if not re.search(r'if needs_cold_start; then\s+log_phase "cold_start_cache_sync_start"\s+clear_bundled_marketplace_tmp_cache.*?monitor_bundled_marketplace_tmp_permissions.*?sync_browser_use_bundled_plugin_cache.*?sync_chrome_bundled_plugin_cache.*?sync_computer_use_bundled_plugin_cache.*?sync_read_aloud_bundled_plugin_cache.*?run_cold_start_hooks.*?log_phase "cold_start_hooks_dispatched"\s+fi', runtime_body, re.S):
     raise SystemExit("bundled marketplace cleanup, plugin sync, and cold-start hooks must run only on cold start")
+for marker in (
+    "initial_launch_state_refresh_start",
+    "initial_launch_state_refreshed",
+    "feature_prelaunch_start",
+    "packaged_prelaunch_start",
+    "browser_use_plugin_cache_synced",
+    "chrome_plugin_cache_synced",
+    "computer_use_plugin_cache_synced",
+    "read_aloud_plugin_cache_synced",
+    "launcher_lock_ready",
+    "launch_state_refreshed_under_lock",
+):
+    if f'log_phase "{marker}"' not in source:
+        raise SystemExit(f"launcher must log phase marker {marker}")
 if 'if [ -z "${CODEX_CLI_PATH:-}" ]; then' not in runtime_body:
     raise SystemExit("launcher must run the cheap CLI lookup even for second-instance fallback")
 if 'if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then' not in runtime_body:
@@ -2950,11 +2984,11 @@ if 'pid_in_same_launch_instance "$pid"' not in discover_body:
 instance_match_body = source.split("pid_in_same_launch_instance() {", 1)[1].split("discover_running_app_pid() {", 1)[0]
 if 'CODEX_LINUX_INSTANCE_ID=$CODEX_LINUX_INSTANCE_ID' not in instance_match_body or 'CODEX_LINUX_MULTI_LAUNCH=1' not in instance_match_body:
     raise SystemExit("pid_in_same_launch_instance must match instance identity from the process environment")
-if 'refresh_launch_state\ntrap cleanup_launcher EXIT' not in source:
+if not re.search(r'log_phase "initial_launch_state_refresh_start"\s+refresh_launch_state\s+log_phase "initial_launch_state_refreshed"\s+trap cleanup_launcher EXIT', source):
     raise SystemExit("launcher must do an initial runtime-state refresh before warm-start IPC")
 if "trap 'exit 130' INT" not in source or "trap 'exit 143' TERM" not in source or "trap 'exit 129' HUP" not in source:
     raise SystemExit("launcher must cleanup through EXIT after INT/TERM/HUP")
-if 'if needs_cold_start; then\n    acquire_launcher_lock\n    refresh_launch_state\n    detect_cross_install_conflict\nfi' not in source:
+if not re.search(r'if needs_cold_start; then\s+acquire_launcher_lock\s+log_phase "launcher_lock_ready"\s+refresh_launch_state\s+log_phase "launch_state_refreshed_under_lock"\s+detect_cross_install_conflict\s+fi', source):
     raise SystemExit("launcher must re-check runtime state under the launcher lock immediately before cold launch")
 if 'CODEX_LAUNCHER_LOCK_WAIT_SECONDS:-5' not in source:
     raise SystemExit("launcher lock wait must default to 5 seconds so duplicate launches do not look hung")
@@ -2966,8 +3000,21 @@ if "detect_cross_install_conflict" not in source or "Both use app id" not in sou
     raise SystemExit("launcher must detect same-identity cross-install conflicts before cold start")
 if "reap_orphaned_runtime_processes" not in reconcile_body or "Stopping orphaned Codex runtime process" not in source:
     raise SystemExit("reconcile_runtime_state must stop orphaned runtime processes after stale launcher state")
-if "pid_is_orphaned_runtime_process" not in source or "chrome_crashpad_handler|node" not in source:
+if (
+    "pid_is_orphaned_runtime_process" not in source
+    or '"$SCRIPT_DIR/chrome_crashpad_handler"' not in source
+    or '"$SCRIPT_DIR/resources/node-runtime/bin/node"' not in source
+    or '"$SCRIPT_DIR/resources/node_repl"' not in source
+):
     raise SystemExit("orphan cleanup must cover same-app Electron helpers, crashpad, and managed Node children")
+if "for pid in $(launcher_lock_holder_pids)" not in reap_body or "pid_matches_app_identity \"$pid\"" not in reap_body:
+    raise SystemExit("orphan cleanup must reap same-app children that inherited launcher.lock")
+if "timeout 1 fuser" not in lock_holder_body:
+    raise SystemExit("launcher lock holder diagnostics must use a bounded fuser probe")
+if "/proc/[0-9]*/fd" in lock_holder_body or "readlink" in lock_holder_body or "canonical_path" in lock_holder_body:
+    raise SystemExit("launcher lock holder diagnostics must not scan or canonicalize /proc fd targets")
+if "LAUNCHER_LOCK_FD_OPEN=1" not in source or "exec 9>&-" not in source:
+    raise SystemExit("launcher lock fd must be tracked and closed after the critical section")
 if "CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1" not in launch_body:
     raise SystemExit("launcher must log the GPU compositing workaround hint for side-panel flicker")
 if launch_body.count("release_launcher_lock") != 2:

@@ -207,6 +207,7 @@ ADOPTED_WEBVIEW_PID=""
 ELECTRON_PID=""
 RUNNING_APP_PID=""
 WARM_START=0
+LAUNCHER_LOCK_FD_OPEN=0
 
 if [[ "${LAUNCHER_ARGS[0]:-}" == "--help" || "${LAUNCHER_ARGS[0]:-}" == "-h" ]]; then
     cat <<HELP
@@ -1408,12 +1409,31 @@ pid_is_electron_helper() {
 
 pid_cmdline() {
     local pid="$1"
+    [ -r "/proc/$pid/cmdline" ] || return 0
     tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//'
+}
+
+pid_cmdline_arg0() {
+    local pid="$1"
+    local arg0=""
+
+    [ -r "/proc/$pid/cmdline" ] || return 0
+    IFS= read -r -d '' arg0 < "/proc/$pid/cmdline" 2>/dev/null || true
+    printf '%s\n' "$arg0"
+}
+
+pid_cmdline_arg0_path() {
+    local pid="$1"
+    local arg0
+
+    arg0="$(pid_cmdline_arg0 "$pid")"
+    printf '%s\n' "${arg0%% *}"
 }
 
 pid_environ_lines() {
     local pid="$1"
-    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null || true
+    [ -r "/proc/$pid/environ" ] || return 0
+    tr '\0' '\n' 2>/dev/null < "/proc/$pid/environ" || true
 }
 
 pid_matches_executable() {
@@ -1423,9 +1443,9 @@ pid_matches_executable() {
 
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     [ -d "/proc/$pid" ] || return 1
+    actual="$(pid_cmdline_arg0_path "$pid")"
+    [ "$actual" = "$expected" ] || return 1
     pid_is_current_user "$pid" || return 1
-    actual="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
-    [ "$actual" = "$(canonical_path "$expected")" ] || return 1
     ! pid_is_electron_helper "$pid"
 }
 
@@ -1482,28 +1502,26 @@ pid_matches_app_identity() {
 pid_is_foreign_codex_electron() {
     local pid="$1"
     local actual
-    local expected
 
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     [ -d "/proc/$pid" ] || return 1
+    actual="$(pid_cmdline_arg0_path "$pid")"
+    [ -n "$actual" ] || return 1
+    [ "$actual" != "$SCRIPT_DIR/electron" ] || return 1
+    [ "${actual##*/}" = "electron" ] || return 1
     pid_is_current_user "$pid" || return 1
     ! pid_is_electron_helper "$pid" || return 1
-    actual="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
-    expected="$(canonical_path "$SCRIPT_DIR/electron")"
-    [ -n "$actual" ] || return 1
-    [ "$actual" != "$expected" ] || return 1
-    [ "$(basename "$actual")" = "electron" ] || return 1
     pid_matches_app_identity "$pid"
 }
 
 discover_running_app_pid() {
     local pid
-    local proc_exe
+    local proc_cmdline
 
-    for proc_exe in /proc/[0-9]*/exe; do
-        [ -e "$proc_exe" ] || continue
-        pid="${proc_exe#/proc/}"
-        pid="${pid%/exe}"
+    for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$proc_cmdline" ] || continue
+        pid="${proc_cmdline#/proc/}"
+        pid="${pid%/cmdline}"
         if pid_matches_executable "$pid" "$SCRIPT_DIR/electron" && pid_in_same_launch_instance "$pid"; then
             echo "$pid"
             return 0
@@ -1515,12 +1533,12 @@ discover_running_app_pid() {
 
 discover_foreign_app_pid() {
     local pid
-    local proc_exe
+    local proc_cmdline
 
-    for proc_exe in /proc/[0-9]*/exe; do
-        [ -e "$proc_exe" ] || continue
-        pid="${proc_exe#/proc/}"
-        pid="${pid%/exe}"
+    for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$proc_cmdline" ] || continue
+        pid="${proc_cmdline#/proc/}"
+        pid="${pid%/cmdline}"
         if pid_is_foreign_codex_electron "$pid"; then
             echo "$pid"
             return 0
@@ -1534,7 +1552,7 @@ pid_install_dir() {
     local pid="$1"
     local actual
 
-    actual="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    actual="$(pid_cmdline_arg0_path "$pid")"
     [ -n "$actual" ] || return 1
     dirname "$actual"
 }
@@ -1542,44 +1560,47 @@ pid_install_dir() {
 pid_summary() {
     local pid="$1"
     local exe
-    local cwd
     local cmdline
 
-    exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
-    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    exe="$(pid_cmdline_arg0_path "$pid")"
     cmdline="$(pid_cmdline "$pid")"
-    printf 'pid=%s exe=%s cwd=%s cmd=%s' "$pid" "${exe:-unknown}" "${cwd:-unknown}" "${cmdline:-unknown}"
+    printf 'pid=%s exe=%s cmd=%s' "$pid" "${exe:-unknown}" "${cmdline:-unknown}"
 }
 
 pid_is_orphaned_runtime_process() {
     local pid="$1"
-    local actual
-    local script_root
-    local exe_name
+    local cmdline
+    local arg0
 
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     [ "$pid" != "$$" ] || return 1
     [ -d "/proc/$pid" ] || return 1
-    pid_is_current_user "$pid" || return 1
-    pid_matches_app_identity "$pid" || return 1
 
-    actual="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
-    script_root="$(canonical_path "$SCRIPT_DIR")"
-    [ -n "$actual" ] || return 1
-    case "$actual" in
-        "$script_root"/*) ;;
-        *) return 1 ;;
-    esac
-
-    exe_name="$(basename "$actual")"
-    case "$exe_name" in
-        electron)
+    arg0="$(pid_cmdline_arg0_path "$pid")"
+    case "$arg0" in
+        "$SCRIPT_DIR/electron")
+            pid_is_current_user "$pid" || return 1
+            pid_matches_app_identity "$pid" || return 1
             pid_is_electron_helper "$pid"
             ;;
-        chrome_crashpad_handler|node)
+        "$SCRIPT_DIR/chrome_crashpad_handler"|"$SCRIPT_DIR/resources/node-runtime/bin/node"|"$SCRIPT_DIR/resources/node_repl")
+            pid_is_current_user "$pid" || return 1
+            pid_matches_app_identity "$pid" || return 1
             return 0
             ;;
         *)
+            case "$arg0" in
+                "$SCRIPT_DIR"/*) ;;
+                *) return 1 ;;
+            esac
+            cmdline="$(pid_cmdline "$pid")"
+            case "$cmdline" in
+                *"$SCRIPT_DIR/resources/node-runtime/bin/node"*|*"$SCRIPT_DIR/resources/node_repl"*)
+                    pid_is_current_user "$pid" || return 1
+                    pid_matches_app_identity "$pid" || return 1
+                    return 0
+                    ;;
+            esac
             return 1
             ;;
     esac
@@ -2035,17 +2056,26 @@ clear_stale_pid_file() {
 
 reap_orphaned_runtime_processes() {
     local pid
-    local proc_exe
+    local proc_cmdline
     local pids=()
     local still_running=0
 
-    for proc_exe in /proc/[0-9]*/exe; do
-        [ -e "$proc_exe" ] || continue
-        pid="${proc_exe#/proc/}"
-        pid="${pid%/exe}"
+    for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$proc_cmdline" ] || continue
+        pid="${proc_cmdline#/proc/}"
+        pid="${pid%/cmdline}"
         if pid_is_orphaned_runtime_process "$pid"; then
             pids+=("$pid")
         fi
+    done
+
+    for pid in $(launcher_lock_holder_pids); do
+        [ "$pid" != "$$" ] || continue
+        pid_matches_app_identity "$pid" || continue
+        case " ${pids[*]} " in
+            *" $pid "*) ;;
+            *) pids+=("$pid") ;;
+        esac
     done
 
     [ "${#pids[@]}" -gt 0 ] || return 0
@@ -2071,7 +2101,26 @@ reap_orphaned_runtime_processes() {
 
     for pid in "${pids[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
-            echo "WARN: orphaned Codex runtime process is still running after SIGTERM: $(pid_summary "$pid")"
+            echo "WARN: orphaned Codex runtime process is still running after SIGTERM; sending SIGKILL: $(pid_summary "$pid")"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+
+    for _ in $(seq 1 10); do
+        still_running=0
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                still_running=1
+                break
+            fi
+        done
+        [ "$still_running" -eq 0 ] && return 0
+        sleep 0.05
+    done
+
+    for pid in "${pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "WARN: orphaned Codex runtime process is still running after SIGKILL: $(pid_summary "$pid")"
         fi
     done
 }
@@ -2558,22 +2607,19 @@ launcher_lock_wait_seconds() {
 }
 
 launcher_lock_holder_pids() {
-    local lock_file="$APP_STATE_DIR/launcher.lock"
-    local lock_path
-    local fd
+    local output
+    local token
     local pid
-    local target
     local seen=" "
 
-    lock_path="$(canonical_path "$lock_file")"
-    for fd in /proc/[0-9]*/fd/*; do
-        [ -e "$fd" ] || continue
-        pid="${fd#/proc/}"
-        pid="${pid%%/fd/*}"
+    command -v fuser >/dev/null 2>&1 || return 0
+    command -v timeout >/dev/null 2>&1 || return 0
+    output="$(timeout 1 fuser "$APP_STATE_DIR/launcher.lock" 2>/dev/null || true)"
+    for token in $output; do
+        pid="${token//[!0-9]/}"
+        [ -n "$pid" ] || continue
         [ "$pid" != "$$" ] || continue
         pid_is_current_user "$pid" || continue
-        target="$(readlink -f "$fd" 2>/dev/null || true)"
-        [ "$target" = "$lock_path" ] || continue
         case "$seen" in
             *" $pid "*) ;;
             *)
@@ -2601,15 +2647,16 @@ launcher_lock_holder_summary() {
 # Serialize the running-app detection -> Electron spawn -> app.pid write
 # critical section across concurrent launchers. Without this, two launches
 # racing through detection can both cold-start, and the loser's cleanup later
-# deletes the survivor's app.pid marker, making it undetectable. Fd 9 stays
-# open in this shell; the flock is released explicitly, so the fd leaking
-# into child processes does not extend the lock.
+# deletes the survivor's app.pid marker, making it undetectable. Fd 9 must not
+# survive into Electron or plugin children, otherwise a stale child can keep the
+# flock alive after this launcher has moved on.
 acquire_launcher_lock() {
     local wait_seconds
     local holders
 
     command -v flock >/dev/null 2>&1 || return 0
     exec 9>"$APP_STATE_DIR/launcher.lock" || return 0
+    LAUNCHER_LOCK_FD_OPEN=1
     if flock -n 9; then
         return 0
     fi
@@ -2634,8 +2681,16 @@ acquire_launcher_lock() {
     fi
 }
 
+close_launcher_lock_fd_for_child() {
+    [ "$LAUNCHER_LOCK_FD_OPEN" -eq 1 ] || return 0
+    { exec 9>&-; } 2>/dev/null || true
+}
+
 release_launcher_lock() {
+    [ "$LAUNCHER_LOCK_FD_OPEN" -eq 1 ] || return 0
     flock -u 9 2>/dev/null || true
+    { exec 9>&-; } 2>/dev/null || true
+    LAUNCHER_LOCK_FD_OPEN=0
 }
 
 refresh_launch_state() {
@@ -2670,8 +2725,11 @@ launch_electron() {
     if [ "$ELECTRON_GPU_COMPOSITING_DISABLED" = "0" ] && [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
         echo "Rendering hint: if the side panel flickers or appears transparent on Wayland, retry with CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1"
     fi
-    unset ELECTRON_RUN_AS_NODE
-    "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}" &
+    (
+        close_launcher_lock_fd_for_child
+        unset ELECTRON_RUN_AS_NODE
+        exec "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"
+    ) &
     ELECTRON_PID=$!
     if [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"; then
         echo "Preserving Codex Desktop pid=$RUNNING_APP_PID liveness marker for second-instance handoff"
@@ -2696,7 +2754,9 @@ load_packaged_runtime_helper
 prepend_managed_node_runtime_to_path
 source_feature_env_files
 register_url_scheme_handlers
+log_phase "initial_launch_state_refresh_start"
 refresh_launch_state
+log_phase "initial_launch_state_refreshed"
 trap cleanup_launcher EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -2715,8 +2775,10 @@ if using_second_instance_handoff; then
     log_phase "second_instance_handoff_ready"
 elif needs_cold_start; then
     detect_cross_install_conflict
+    log_phase "feature_prelaunch_start"
     run_feature_prelaunch_hooks
     log_phase "feature_prelaunch"
+    log_phase "packaged_prelaunch_start"
     run_packaged_runtime_prelaunch
     log_phase "packaged_prelaunch"
     ensure_webview_server
@@ -2771,21 +2833,32 @@ fi
 
 export_packaged_runtime_env
 if needs_cold_start; then
+    log_phase "cold_start_cache_sync_start"
     clear_bundled_marketplace_tmp_cache
+    log_phase "bundled_marketplace_tmp_cleared"
     # The runtime marketplace is populated asynchronously and can briefly
     # recreate read-only plugin cache trees before the sync below replaces them.
     monitor_bundled_marketplace_tmp_permissions
+    log_phase "bundled_marketplace_tmp_monitor_started"
     sync_browser_use_bundled_plugin_cache
+    log_phase "browser_use_plugin_cache_synced"
     sync_chrome_bundled_plugin_cache
+    log_phase "chrome_plugin_cache_synced"
     sync_computer_use_bundled_plugin_cache
+    log_phase "computer_use_plugin_cache_synced"
     sync_read_aloud_bundled_plugin_cache
+    log_phase "read_aloud_plugin_cache_synced"
     run_cold_start_hooks
+    log_phase "cold_start_hooks_dispatched"
 fi
 resolve_browser_use_runtime_env
+log_phase "browser_use_runtime_env_resolved"
 
 if needs_cold_start; then
     acquire_launcher_lock
+    log_phase "launcher_lock_ready"
     refresh_launch_state
+    log_phase "launch_state_refreshed_under_lock"
     detect_cross_install_conflict
 fi
 
