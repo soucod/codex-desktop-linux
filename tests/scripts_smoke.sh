@@ -2820,7 +2820,6 @@ multi_body = source.split("configure_multi_launch_instance() {", 1)[1].split('WE
 adopt_body = source.split("adopt_existing_webview_server() {", 1)[1].split("ensure_webview_server() {", 1)[0]
 ensure_body = source.split("ensure_webview_server() {", 1)[1].split("wait_for_webview_server", 1)[0]
 reconcile_body = source.split("reconcile_runtime_state() {", 1)[1].split("set_electron_defaults() {", 1)[0]
-lock_holder_body = source.split("launcher_lock_holder_pids() {", 1)[1].split("launcher_lock_holder_summary() {", 1)[0]
 orphan_body = source.split("pid_is_orphaned_runtime_process() {", 1)[1].split("detect_cross_install_conflict() {", 1)[0]
 reap_body = source.split("reap_orphaned_runtime_processes() {", 1)[1].split("reconcile_runtime_state() {", 1)[0]
 match_executable_body = source.split("pid_matches_executable() {", 1)[1].split("find_running_app_pid() {", 1)[0]
@@ -2864,15 +2863,15 @@ if 'launch_electron "${LAUNCHER_ARGS[@]}"' not in source:
     raise SystemExit("Electron launch must receive sanitized launcher args")
 if 'Adopted concurrently-started verified webview server' not in source:
     raise SystemExit("launcher must tolerate a concurrent verified webview server winning the bind race")
-if 'RUNNING_APP_PID="$(find_running_app_pid)"' not in detect_body:
+if 'set_detected_running_app "$pid"' not in detect_body:
     raise SystemExit("detect_warm_start must record a pid-file running app even when warm start is disabled")
-if 'RUNNING_APP_PID="$(find_running_app_pid)" || RUNNING_APP_PID="$(discover_running_app_pid)"' not in detect_body:
-    raise SystemExit("detect_warm_start must fall back to the running-app scan even when the launch socket is missing")
+if 'runtime_recovery_scan_needed && pid="$(discover_running_app_pid)"' not in detect_body:
+    raise SystemExit("detect_warm_start must limit the running-app scan to recovery cases")
 if '[ -S "$LAUNCH_ACTION_SOCKET" ]' in detect_body:
     raise SystemExit("detect_warm_start must not gate the running-app scan on launch socket existence; hidden instances can lose the socket")
-if not re.search(r'if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then.*?return 0', detect_body, re.S):
+if not re.search(r'if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then.*?return 0', source, re.S):
     raise SystemExit("detect_warm_start must not fail when warm start is disabled")
-if "preserving liveness marker for second-instance handoff" not in detect_body:
+if "preserving liveness marker for second-instance handoff" not in source:
     raise SystemExit("detect_warm_start must preserve the live app liveness marker")
 if launch_body.count("unset ELECTRON_RUN_AS_NODE") != 2:
     raise SystemExit("launch_electron must clear ELECTRON_RUN_AS_NODE before both Electron launch paths")
@@ -2884,6 +2883,10 @@ if "pid_cmdline_arg0_path" not in source:
     raise SystemExit("launcher process discovery must use cmdline arg0 path rather than canonicalizing /proc exe paths")
 if "/proc/[0-9]*/exe" in source or 'readlink -f "/proc/$pid/exe"' in source or 'canonical_path "$SCRIPT_DIR/electron"' in source:
     raise SystemExit("launcher process discovery must not scan or canonicalize /proc exe paths; autofs can block those stats")
+if "command -v fuser" in source or "timeout 1 fuser" in source or "launcher_lock_holder_pids" in source:
+    raise SystemExit("launcher lock diagnostics must not require fuser/timeout or scan /proc fd targets")
+if "command -v timeout" in source or re.search(r'(^|[ \t])timeout[ \t]+"?\\$', source, re.M):
+    raise SystemExit("launcher hot path must not require external timeout")
 if match_executable_body.index('actual="$(pid_cmdline_arg0_path "$pid")"') > match_executable_body.index('pid_is_current_user "$pid"'):
     raise SystemExit("launcher process discovery must check cmdline arg0 before reading /proc status for UID")
 if 'basename "$actual"' in foreign_body:
@@ -2970,8 +2973,10 @@ if ensure_body.find("stop_stale_webview_server") > ensure_body.find("is already 
     raise SystemExit("ensure_webview_server must try stale-server cleanup before foreign reachable-port failure")
 if "Keeping the live app untouched" not in ensure_body:
     raise SystemExit("ensure_webview_server must not stop a live app server when validation fails")
-if 'if live_app_pid="$(find_running_app_pid)" || live_app_pid="$(discover_running_app_pid)"; then' not in reconcile_body:
+if 'if [ -n "${RUNNING_APP_PID:-}" ] && running_app_is_active; then' not in reconcile_body:
     raise SystemExit("reconcile_runtime_state must preserve runtime markers when a live app still exists")
+if 'discover_running_app_pid' in reconcile_body:
+    raise SystemExit("reconcile_runtime_state must not perform full process discovery on the normal startup path")
 if 'rm -f "$LAUNCH_ACTION_SOCKET"' not in reconcile_body:
     raise SystemExit("reconcile_runtime_state must clear a stale launch-action socket when no live app exists")
 if 'clear_stale_pid_file' not in reconcile_body:
@@ -2988,18 +2993,20 @@ if not re.search(r'log_phase "initial_launch_state_refresh_start"\s+refresh_laun
     raise SystemExit("launcher must do an initial runtime-state refresh before warm-start IPC")
 if "trap 'exit 130' INT" not in source or "trap 'exit 143' TERM" not in source or "trap 'exit 129' HUP" not in source:
     raise SystemExit("launcher must cleanup through EXIT after INT/TERM/HUP")
-if not re.search(r'if needs_cold_start; then\s+acquire_launcher_lock\s+log_phase "launcher_lock_ready"\s+refresh_launch_state\s+log_phase "launch_state_refreshed_under_lock"\s+detect_cross_install_conflict\s+fi', source):
-    raise SystemExit("launcher must re-check runtime state under the launcher lock immediately before cold launch")
+if not re.search(r'if needs_cold_start; then\s+acquire_launcher_lock\s+log_phase "launcher_lock_ready"\s+refresh_launch_state_quick\s+log_phase "launch_state_refreshed_under_lock"', source):
+    raise SystemExit("launcher must do only a quick state refresh under the launcher lock")
 if 'CODEX_LAUNCHER_LOCK_WAIT_SECONDS:-5' not in source:
     raise SystemExit("launcher lock wait must default to 5 seconds so duplicate launches do not look hung")
 if 'flock -n 9' not in source or 'flock -w "$wait_seconds" 9' not in source:
     raise SystemExit("launcher lock must first probe and then use a bounded wait")
-if "Another $CODEX_LINUX_APP_DISPLAY_NAME launcher is holding" not in source or "launcher_lock_holder_pids" not in source:
-    raise SystemExit("launcher lock waits must emit visible holder diagnostics")
+if "Another $CODEX_LINUX_APP_DISPLAY_NAME launcher is holding" not in source:
+    raise SystemExit("launcher lock waits must emit visible diagnostics")
 if "detect_cross_install_conflict" not in source or "Both use app id" not in source:
-    raise SystemExit("launcher must detect same-identity cross-install conflicts before cold start")
-if "reap_orphaned_runtime_processes" not in reconcile_body or "Stopping orphaned Codex runtime process" not in source:
-    raise SystemExit("reconcile_runtime_state must stop orphaned runtime processes after stale launcher state")
+    raise SystemExit("launcher must still support same-identity cross-install diagnostics")
+if "reap_orphaned_runtime_processes" in reconcile_body:
+    raise SystemExit("reconcile_runtime_state must not reap orphaned processes on the normal startup path")
+if "LAUNCHER_LOCK_TIMED_OUT" not in source or "reap_orphaned_runtime_processes" not in source:
+    raise SystemExit("orphan cleanup should remain available only for exceptional lock-timeout recovery")
 if (
     "pid_is_orphaned_runtime_process" not in source
     or '"$SCRIPT_DIR/chrome_crashpad_handler"' not in source
@@ -3007,12 +3014,8 @@ if (
     or '"$SCRIPT_DIR/resources/node_repl"' not in source
 ):
     raise SystemExit("orphan cleanup must cover same-app Electron helpers, crashpad, and managed Node children")
-if "for pid in $(launcher_lock_holder_pids)" not in reap_body or "pid_matches_app_identity \"$pid\"" not in reap_body:
-    raise SystemExit("orphan cleanup must reap same-app children that inherited launcher.lock")
-if "timeout 1 fuser" not in lock_holder_body:
-    raise SystemExit("launcher lock holder diagnostics must use a bounded fuser probe")
-if "/proc/[0-9]*/fd" in lock_holder_body or "readlink" in lock_holder_body or "canonical_path" in lock_holder_body:
-    raise SystemExit("launcher lock holder diagnostics must not scan or canonicalize /proc fd targets")
+if "launcher_lock_holder_pids" in reap_body:
+    raise SystemExit("orphan cleanup must not require fuser-based lock holder discovery")
 if "LAUNCHER_LOCK_FD_OPEN=1" not in source or "exec 9>&-" not in source:
     raise SystemExit("launcher lock fd must be tracked and closed after the critical section")
 if "CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1" not in launch_body:

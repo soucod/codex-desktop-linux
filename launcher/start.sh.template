@@ -208,6 +208,7 @@ ELECTRON_PID=""
 RUNNING_APP_PID=""
 WARM_START=0
 LAUNCHER_LOCK_FD_OPEN=0
+LAUNCHER_LOCK_TIMED_OUT=0
 
 if [[ "${LAUNCHER_ARGS[0]:-}" == "--help" || "${LAUNCHER_ARGS[0]:-}" == "-h" ]]; then
     cat <<HELP
@@ -1395,22 +1396,49 @@ run_update_manager() {
 
 pid_is_current_user() {
     local pid="$1"
+    local key
     local uid
 
-    uid="$(awk '/^Uid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
-    [ "$uid" = "$(id -u)" ]
+    [ -r "/proc/$pid/status" ] || return 1
+    while IFS=$' \t' read -r key uid _; do
+        if [ "$key" = "Uid:" ]; then
+            [ "$uid" = "$EUID" ]
+            return $?
+        fi
+    done < "/proc/$pid/status"
+    return 1
 }
 
 pid_is_electron_helper() {
     local pid="$1"
-    [ -r "/proc/$pid/cmdline" ] || return 1
-    tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -q '^--type='
+    local cmdline
+
+    cmdline="$(pid_cmdline "$pid")"
+    [[ "$cmdline" == --type=* || "$cmdline" == *" --type="* ]]
 }
 
 pid_cmdline() {
     local pid="$1"
+    local part
+    local cmdline=""
+
     [ -r "/proc/$pid/cmdline" ] || return 0
-    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//'
+    while IFS= read -r -d '' part; do
+        if [ -n "$cmdline" ]; then
+            cmdline="$cmdline $part"
+        else
+            cmdline="$part"
+        fi
+        part=""
+    done < "/proc/$pid/cmdline" 2>/dev/null || true
+    if [ -n "${part:-}" ]; then
+        if [ -n "$cmdline" ]; then
+            cmdline="$cmdline $part"
+        else
+            cmdline="$part"
+        fi
+    fi
+    printf '%s\n' "$cmdline"
 }
 
 pid_cmdline_arg0() {
@@ -1623,6 +1651,28 @@ detect_cross_install_conflict() {
     exit 1
 }
 
+runtime_recovery_scan_needed() {
+    [ -f "$APP_PID_FILE" ] && return 0
+    [ -e "$LAUNCH_ACTION_SOCKET" ] && return 0
+    [ -f "$WEBVIEW_PID_FILE" ] && return 0
+    return 1
+}
+
+set_detected_running_app() {
+    RUNNING_APP_PID="$1"
+    echo "$RUNNING_APP_PID" > "$APP_PID_FILE"
+
+    if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then
+        WARM_START=0
+        echo "Warm-start handoff disabled by $APP_SETTINGS_FILE"
+        echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; preserving liveness marker for second-instance handoff"
+        return 0
+    fi
+
+    WARM_START=1
+    echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; using warm-start handoff"
+}
+
 running_app_is_active() {
     [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"
 }
@@ -1636,22 +1686,15 @@ needs_cold_start() {
 }
 
 detect_warm_start() {
-    # Always fall back to the /proc scan: a hidden-to-tray instance can lose
-    # both its app.pid marker (clobbered by a failed duplicate launch) and its
-    # launch-action socket (runtime dir wiped, warm start disabled, or socket
-    # setup failed), and gating the scan on the socket made such an instance
-    # undetectable — every launch then cold-started a duplicate.
-    if RUNNING_APP_PID="$(find_running_app_pid)" || RUNNING_APP_PID="$(discover_running_app_pid)"; then
-        echo "$RUNNING_APP_PID" > "$APP_PID_FILE"
-        if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then
-            WARM_START=0
-            echo "Warm-start handoff disabled by $APP_SETTINGS_FILE"
-            echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; preserving liveness marker for second-instance handoff"
-            return 0
-        fi
+    local pid
 
-        WARM_START=1
-        echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; using warm-start handoff"
+    if pid="$(find_running_app_pid)"; then
+        set_detected_running_app "$pid"
+        return 0
+    fi
+
+    if runtime_recovery_scan_needed && pid="$(discover_running_app_pid)"; then
+        set_detected_running_app "$pid"
         return 0
     fi
 
@@ -1988,6 +2031,7 @@ ensure_webview_server() {
             return 0
         fi
 
+        detect_cross_install_conflict
         notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview port $CODEX_LINUX_WEBVIEW_PORT is already serving Codex content, but it is not owned by this launcher. Stop the other webview server and try again."
         exit 1
     fi
@@ -2003,6 +2047,7 @@ ensure_webview_server() {
         fi
 
         if webview_port_is_open; then
+            detect_cross_install_conflict
             notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview port $CODEX_LINUX_WEBVIEW_PORT is already in use. Stop the other process and try again."
             exit 1
         fi
@@ -2069,15 +2114,6 @@ reap_orphaned_runtime_processes() {
         fi
     done
 
-    for pid in $(launcher_lock_holder_pids); do
-        [ "$pid" != "$$" ] || continue
-        pid_matches_app_identity "$pid" || continue
-        case " ${pids[*]} " in
-            *" $pid "*) ;;
-            *) pids+=("$pid") ;;
-        esac
-    done
-
     [ "${#pids[@]}" -gt 0 ] || return 0
 
     for pid in "${pids[@]}"; do
@@ -2126,16 +2162,14 @@ reap_orphaned_runtime_processes() {
 }
 
 reconcile_runtime_state() {
-    local live_app_pid=""
     local webview_pid=""
 
-    if live_app_pid="$(find_running_app_pid)" || live_app_pid="$(discover_running_app_pid)"; then
-        echo "$live_app_pid" > "$APP_PID_FILE"
+    if [ -n "${RUNNING_APP_PID:-}" ] && running_app_is_active; then
+        echo "$RUNNING_APP_PID" > "$APP_PID_FILE"
         return 0
     fi
 
     clear_stale_pid_file
-    reap_orphaned_runtime_processes
 
     if [ -e "$LAUNCH_ACTION_SOCKET" ]; then
         rm -f "$LAUNCH_ACTION_SOCKET"
@@ -2606,44 +2640,6 @@ launcher_lock_wait_seconds() {
     echo "$value"
 }
 
-launcher_lock_holder_pids() {
-    local output
-    local token
-    local pid
-    local seen=" "
-
-    command -v fuser >/dev/null 2>&1 || return 0
-    command -v timeout >/dev/null 2>&1 || return 0
-    output="$(timeout 1 fuser "$APP_STATE_DIR/launcher.lock" 2>/dev/null || true)"
-    for token in $output; do
-        pid="${token//[!0-9]/}"
-        [ -n "$pid" ] || continue
-        [ "$pid" != "$$" ] || continue
-        pid_is_current_user "$pid" || continue
-        case "$seen" in
-            *" $pid "*) ;;
-            *)
-                seen="$seen$pid "
-                echo "$pid"
-                ;;
-        esac
-    done
-}
-
-launcher_lock_holder_summary() {
-    local pid
-    local first=1
-
-    for pid in $(launcher_lock_holder_pids); do
-        if [ "$first" -eq 1 ]; then
-            first=0
-        else
-            printf '; '
-        fi
-        pid_summary "$pid"
-    done
-}
-
 # Serialize the running-app detection -> Electron spawn -> app.pid write
 # critical section across concurrent launchers. Without this, two launches
 # racing through detection can both cold-start, and the loser's cleanup later
@@ -2652,9 +2648,9 @@ launcher_lock_holder_summary() {
 # flock alive after this launcher has moved on.
 acquire_launcher_lock() {
     local wait_seconds
-    local holders
 
     command -v flock >/dev/null 2>&1 || return 0
+    LAUNCHER_LOCK_TIMED_OUT=0
     exec 9>"$APP_STATE_DIR/launcher.lock" || return 0
     LAUNCHER_LOCK_FD_OPEN=1
     if flock -n 9; then
@@ -2662,20 +2658,11 @@ acquire_launcher_lock() {
     fi
 
     wait_seconds="$(launcher_lock_wait_seconds)"
-    holders="$(launcher_lock_holder_summary)"
-    if [ -n "$holders" ]; then
-        launcher_notice "Another $CODEX_LINUX_APP_DISPLAY_NAME launcher is holding $APP_STATE_DIR/launcher.lock; waiting up to ${wait_seconds}s. Holders: $holders"
-    else
-        launcher_notice "Another $CODEX_LINUX_APP_DISPLAY_NAME launcher is holding $APP_STATE_DIR/launcher.lock; waiting up to ${wait_seconds}s."
-    fi
+    launcher_notice "Another $CODEX_LINUX_APP_DISPLAY_NAME launcher is holding $APP_STATE_DIR/launcher.lock; waiting up to ${wait_seconds}s."
 
     if ! flock -w "$wait_seconds" 9; then
-        holders="$(launcher_lock_holder_summary)"
-        if [ -n "$holders" ]; then
-            launcher_notice "WARN: timed out waiting for launcher.lock after ${wait_seconds}s; continuing after state refresh. Remaining holders: $holders"
-        else
-            launcher_notice "WARN: timed out waiting for launcher.lock after ${wait_seconds}s; continuing after state refresh."
-        fi
+        LAUNCHER_LOCK_TIMED_OUT=1
+        launcher_notice "WARN: timed out waiting for launcher.lock after ${wait_seconds}s; continuing after a quick state refresh."
     else
         echo "Acquired launcher lock after waiting"
     fi
@@ -2696,8 +2683,18 @@ release_launcher_lock() {
 refresh_launch_state() {
     WARM_START=0
     RUNNING_APP_PID=""
-    reconcile_runtime_state
     detect_warm_start
+    reconcile_runtime_state
+}
+
+refresh_launch_state_quick() {
+    local pid
+
+    WARM_START=0
+    RUNNING_APP_PID=""
+    if pid="$(find_running_app_pid)"; then
+        set_detected_running_app "$pid"
+    fi
 }
 
 launch_electron() {
@@ -2774,7 +2771,6 @@ if using_second_instance_handoff; then
     echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; using Electron second-instance handoff"
     log_phase "second_instance_handoff_ready"
 elif needs_cold_start; then
-    detect_cross_install_conflict
     log_phase "feature_prelaunch_start"
     run_feature_prelaunch_hooks
     log_phase "feature_prelaunch"
@@ -2857,9 +2853,12 @@ log_phase "browser_use_runtime_env_resolved"
 if needs_cold_start; then
     acquire_launcher_lock
     log_phase "launcher_lock_ready"
-    refresh_launch_state
+    refresh_launch_state_quick
     log_phase "launch_state_refreshed_under_lock"
-    detect_cross_install_conflict
+    if [ "$LAUNCHER_LOCK_TIMED_OUT" -eq 1 ]; then
+        reap_orphaned_runtime_processes
+        detect_cross_install_conflict
+    fi
 fi
 
 echo "Using CODEX_CLI_PATH=${CODEX_CLI_PATH:-warm-start-skip}"
