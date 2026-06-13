@@ -410,6 +410,117 @@ function applyLinuxBrowserUseNonLocalNavigationPatch(currentSource) {
   return currentSource;
 }
 
+function applyLinuxChatSearchHydrationPatch(currentSource) {
+  if (currentSource.includes("function codexLinuxHydrateSearchConversation(")) {
+    return currentSource;
+  }
+
+  if (!currentSource.includes("search-threads-for-host")) {
+    return currentSource;
+  }
+
+  let patchedSource = currentSource;
+  const requestAliasMatch = patchedSource.match(
+    /([A-Za-z_$][\w$]*)\(`search-threads-for-host`,\{hostId:[A-Za-z_$][\w$]*,query:/u,
+  );
+  const requestAlias = requestAliasMatch?.[1] ?? null;
+
+  const asyncSearchNeedle =
+    /([A-Za-z_$][\w$]*)\.map\(([A-Za-z_$][\w$]*)=>([A-Za-z_$][\w$]*)\(`search-threads-for-host`,\{hostId:\2,query:([A-Za-z_$][\w$]*),limit:([A-Za-z_$][\w$]*)\}\)\)/u;
+  patchedSource = patchedSource.replace(
+    asyncSearchNeedle,
+    (_match, hostsVar, hostVar, requestVar, queryVar, limitVar) =>
+      `${hostsVar}.map(${hostVar}=>${requestVar}(\`search-threads-for-host\`,{hostId:${hostVar},query:${queryVar},limit:${limitVar}}).then(codexLinuxSearchResults=>codexLinuxSearchResults.map(codexLinuxSearchResult=>({...codexLinuxSearchResult,hostId:${hostVar}}))))`,
+  );
+
+  patchedSource = patchedSource.replace(
+    /return\[\{kind:`local`,threadKey:/g,
+    "return[{kind:`local`,hostId:e.hostId??`local`,threadKey:",
+  );
+  patchedSource = patchedSource.replace(
+    /return\{kind:`local`,threadKey:/g,
+    "return{kind:`local`,hostId:e.hostId??`local`,threadKey:",
+  );
+
+  patchedSource = patchedSource.replace(
+    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return \2\.threadKey\}function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return \4\.threadKey\}/u,
+    "function $1($2){return $2}function $3($4){return $4}",
+  );
+
+  let patchedResultSelectCache = false;
+  const resultSelectCachePattern =
+    /(?<cache>[A-Za-z_$][\w$]*)\[(?<closeSlot>\d+)\]!==(?<close>[A-Za-z_$][\w$]*)\|\|\k<cache>\[(?<routeSlot>\d+)\]!==(?<route>[A-Za-z_$][\w$]*)\|\|\k<cache>\[(?<localSlot>\d+)\]!==(?<local>[A-Za-z_$][\w$]*)\|\|\k<cache>\[(?<resultSlot>\d+)\]!==(?<result>[A-Za-z_$][\w$]*)\.threadKey\?\((?<callback>[A-Za-z_$][\w$]*)=\(\)=>\{(?<select>[A-Za-z_$][\w$]*)\(\k<result>\.threadKey,\k<local>,\k<route>\),\k<close>\(\)\},\k<cache>\[\k<closeSlot>\]=\k<close>,\k<cache>\[\k<routeSlot>\]=\k<route>,\k<cache>\[\k<localSlot>\]=\k<local>,\k<cache>\[\k<resultSlot>\]=\k<result>\.threadKey,\k<cache>\[(?<callbackSlot>\d+)\]=\k<callback>\):\k<callback>=\k<cache>\[\k<callbackSlot>\]/u;
+  patchedSource = patchedSource.replace(
+    resultSelectCachePattern,
+    (...args) => {
+      const {
+        cache: cacheVar,
+        closeSlot,
+        close: closeVar,
+        routeSlot,
+        route: routeVar,
+        localSlot,
+        local: localVar,
+        resultSlot,
+        result: resultVar,
+        callbackSlot,
+        callback: callbackVar,
+        select: selectFn,
+      } = args[args.length - 1];
+      patchedResultSelectCache = true;
+      return `${cacheVar}[${closeSlot}]!==${closeVar}||${cacheVar}[${routeSlot}]!==${routeVar}||${cacheVar}[${localSlot}]!==${localVar}||${cacheVar}[${resultSlot}]!==${resultVar}?(${callbackVar}=()=>{${selectFn}(${resultVar},${localVar},${routeVar}),${closeVar}()},${cacheVar}[${closeSlot}]=${closeVar},${cacheVar}[${routeSlot}]=${routeVar},${cacheVar}[${localSlot}]=${localVar},${cacheVar}[${resultSlot}]=${resultVar},${cacheVar}[${callbackSlot}]=${callbackVar}):${callbackVar}=${cacheVar}[${callbackSlot}]`;
+    },
+  );
+  if (!patchedResultSelectCache) {
+    console.warn(
+      "WARN: Could not find chat search result selection cache — skipping Linux chat search hydration patch",
+    );
+    return currentSource;
+  }
+
+  if (requestAlias == null) {
+    if (patchedSource !== currentSource) {
+      console.warn(
+        "WARN: Could not find chat search request helper — skipping Linux chat search hydration patch",
+      );
+      return currentSource;
+    }
+    return currentSource;
+  }
+
+  const routePattern =
+    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2\);if\(\5!=null\)\{\3\(\5\);return\}\4\(([A-Za-z_$][\w$]*)\(\2\)\)\}/u;
+  const routeMatch = patchedSource.match(routePattern);
+  if (routeMatch == null) {
+    if (
+      currentSource.includes("search-threads-for-host") &&
+      currentSource.includes("threadKey")
+    ) {
+      console.warn(
+        "WARN: Could not find chat search route handler — skipping Linux chat search hydration patch",
+      );
+    }
+    return currentSource;
+  }
+
+  const [
+    routeNeedle,
+    routeFn,
+    targetArg,
+    localNavigateArg,
+    routeNavigateArg,
+    conversationVar,
+    localThreadKeyFn,
+    routeThreadKeyFn,
+  ] = routeMatch;
+  const helper = `function codexLinuxSearchThreadKey(e){return e&&typeof e===\`object\`?e.threadKey:e}function codexLinuxHydrateSearchConversation(e,t){try{if(e==null||typeof e!==\`object\`||e.kind!==\`local\`)return Promise.resolve();let n=e.hostId??\`local\`,r=${requestAlias}(\`load-recent-conversation-ids-for-host\`,{hostId:n,conversationIds:[t]}),i=new Promise(e=>globalThis.setTimeout(e,1500));return Promise.race([r,i]).catch(()=>{})}catch{return Promise.resolve()}}`;
+  const routePatch =
+    `${helper}async function ${routeFn}(${targetArg},${localNavigateArg},${routeNavigateArg}){let codexLinuxRouteKey=codexLinuxSearchThreadKey(${targetArg}),${conversationVar}=${localThreadKeyFn}(codexLinuxRouteKey);if(${conversationVar}!=null){await codexLinuxHydrateSearchConversation(${targetArg},${conversationVar});${localNavigateArg}(${conversationVar});return}${routeNavigateArg}(${routeThreadKeyFn}(codexLinuxRouteKey))}`;
+  patchedSource = patchedSource.replace(routeNeedle, routePatch);
+
+  return patchedSource;
+}
+
 function applyLinuxBrowserUseExternalAvailabilityPatch(currentSource) {
   const externalFeatureNeedle = "featureName:`browser_use_external`";
   const statsigNeedle = "410065390";
@@ -1570,6 +1681,7 @@ module.exports = {
   applyBrowserAnnotationScreenshotPatch,
   applyLinuxAppServerBackfillWaitPatch,
   applyLinuxAppServerFeatureEnablementPatch,
+  applyLinuxChatSearchHydrationPatch,
   applyLinuxBrowserUseAvailabilityPatch,
   applyLinuxBrowserUseExternalAvailabilityPatch,
   applyLinuxBrowserUseNonLocalNavigationPatch,
