@@ -1672,7 +1672,7 @@ test_native_shortcut_targets_compose_existing_flows() {
 }
 
 test_fedora_dependency_bootstrap_installs_rpmbuild() {
-    info "Checking Fedora dependency bootstrap includes rpmbuild"
+    info "Checking Fedora dependency bootstrap includes rpmbuild and C++ build tools"
     local install_deps="$REPO_DIR/scripts/install-deps.sh"
     local helper="$REPO_DIR/scripts/lib/install-helpers.sh"
     local readme="$REPO_DIR/README.md"
@@ -1681,13 +1681,17 @@ test_fedora_dependency_bootstrap_installs_rpmbuild() {
         || fail "install_dnf5 must install rpm-build for rpmbuild"
     awk '/^install_dnf\(\) \{/,/^}/' "$install_deps" | grep -q -- "rpm-build" \
         || fail "install_dnf must install rpm-build for rpmbuild"
+    awk '/^install_dnf5\(\) \{/,/^}/' "$install_deps" | grep -q -- "gcc-c++" \
+        || fail "install_dnf5 must install gcc-c++ for g++"
+    awk '/^install_dnf\(\) \{/,/^}/' "$install_deps" | grep -q -- "gcc-c++" \
+        || fail "install_dnf must install gcc-c++ for g++"
 
-    assert_contains "$install_deps" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
-    assert_contains "$install_deps" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build"
-    assert_contains "$helper" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
-    assert_contains "$helper" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build"
-    assert_contains "$readme" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
-    assert_contains "$readme" "sudo dnf install python3 p7zip p7zip-plugins curl unzip rpm-build"
+    assert_contains "$install_deps" "sudo dnf install python3 7zip curl unzip rpm-build make gcc-c++ @development-tools"
+    assert_contains "$install_deps" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build make gcc-c++"
+    assert_contains "$helper" "sudo dnf install python3 7zip curl unzip rpm-build make gcc-c++ @development-tools"
+    assert_contains "$helper" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build make gcc-c++"
+    assert_contains "$readme" "sudo dnf install python3 7zip curl unzip rpm-build make gcc-c++ @development-tools"
+    assert_contains "$readme" "sudo dnf install python3 p7zip p7zip-plugins curl unzip rpm-build make gcc-c++"
 }
 
 test_setup_native_wizard_noninteractive_feature_writer() {
