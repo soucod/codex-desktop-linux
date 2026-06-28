@@ -1448,7 +1448,8 @@ test("Linux remote mobile conversation hydration patch handles current app-serve
   assert.match(patched, /h\?\.type===`active`\|\|h\?\.type===`idle`/);
   assert.match(patched, /codexLinuxRemoteMobileHydrateUnknownTurn/);
   assert.match(patched, /codexLinuxRemoteMobileNotificationQueue/);
-  assert.match(patched, /n\.params\?\.turn\?\.threadId\?\?n\.params\?\.thread\?\.id\?\?n\.params\?\.threadId/);
+  assert.match(patched, /n\.params\?\.turn\?\.threadId\?\?n\.params\?\.thread\?\.id/);
+  assert.doesNotMatch(patched, /n\.params\?\.threadId/);
   assert.match(patched, /Skipping hydration for ambiguous turn\/started/);
   assert.match(patched, /codexLinuxRemoteMobilePendingNotifications\?\?=new Map/);
   assert.match(patched, /this\.readThread\(d,\{includeTurns:!1\}\)/);
@@ -1511,46 +1512,25 @@ test("Linux remote mobile hydration uses captured turn id normalizer helper", ()
   });
 });
 
-test("Linux remote mobile hydration falls back to top-level thread ids", async () => {
+test("Linux remote mobile hydration ignores top-level thread ids without nested thread identity", () => {
   const source = syntheticAppServerManagerSignalsBundle();
   const patched = applyLinuxRemoteMobileConversationHydrationPatch(source);
   const context = {
     module: { exports: {} },
     I: (value) => value,
-    setTimeout,
     z: { error() {}, warning() {} },
   };
   vm.runInNewContext(`${patched};module.exports=T;`, context);
   const manager = new context.module.exports();
-  const readThreadIds = [];
-  const streamed = [];
   manager.conversations = new Map();
-  manager.readThread = async (threadId) => {
-    readThreadIds.push(threadId);
-    return { thread: { id: threadId } };
+  manager.readThread = () => {
+    throw new Error("readThread should not be called without nested thread identity");
   };
-  manager.upsertConversationFromThread = (thread) => {
-    manager.conversations.set(thread.id, thread);
-  };
-  manager.markConversationStreaming = (threadId) => {
-    streamed.push(threadId);
-  };
-  manager.updateConversationState = () => {};
 
   manager.onNotification("turn/started", {
     threadId: "thread-a",
     turn: { id: "turn-a" },
   });
-  manager.onNotification("item/started", {
-    item: { id: "item-a" },
-    threadId: "thread-a",
-    turnId: "turn-a",
-    startedAtMs: 1,
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.deepEqual(readThreadIds, ["thread-a"]);
-  assert.deepEqual(streamed, ["thread-a", "thread-a"]);
 });
 
 test("Linux remote mobile hydration uses nested real thread ids", async () => {
