@@ -9,10 +9,12 @@ use anyhow::{Context, Result};
 use std::{
     ffi::OsString,
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use tokio::process::Command;
 use tracing::info;
+
+const UPDATE_BUILDER_MANIFEST: &str = ".codex-linux/update-builder-manifest.txt";
 
 const REQUIRED_BUNDLE_FILES: [(&str, &str); 19] = [
     ("Cargo.toml", "Cargo.toml"),
@@ -238,6 +240,11 @@ fn package_build_script(bundle_dir: &Path) -> PathBuf {
 }
 
 fn copy_builder_bundle(source_root: &Path, destination_root: &Path) -> Result<()> {
+    let manifest_path = source_root.join(UPDATE_BUILDER_MANIFEST);
+    if manifest_path.exists() {
+        return copy_builder_bundle_from_manifest(source_root, destination_root, &manifest_path);
+    }
+
     for (source, destination) in REQUIRED_BUNDLE_FILES {
         copy_entry(
             &source_root.join(source),
@@ -255,6 +262,54 @@ fn copy_builder_bundle(source_root: &Path, destination_root: &Path) -> Result<()
     }
 
     Ok(())
+}
+
+fn copy_builder_bundle_from_manifest(
+    source_root: &Path,
+    destination_root: &Path,
+    manifest_path: &Path,
+) -> Result<()> {
+    let manifest = fs::read_to_string(manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+
+    for (index, line) in manifest.lines().enumerate() {
+        let entry = line.trim();
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+        let relative_path = Path::new(entry);
+        if !is_safe_manifest_relative_path(relative_path) {
+            anyhow::bail!(
+                "Unsafe update-builder manifest entry at line {}: {}",
+                index + 1,
+                entry
+            );
+        }
+        copy_entry(
+            &source_root.join(relative_path),
+            &destination_root.join(relative_path),
+            false,
+        )?;
+    }
+
+    copy_entry(
+        manifest_path,
+        &destination_root.join(UPDATE_BUILDER_MANIFEST),
+        false,
+    )?;
+    Ok(())
+}
+
+fn is_safe_manifest_relative_path(path: &Path) -> bool {
+    let mut has_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_component = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    has_component && !path.is_absolute()
 }
 
 fn copy_entry(source: &Path, destination: &Path, optional: bool) -> Result<()> {
@@ -885,6 +940,72 @@ fi
             .exists());
         assert!(!destination_root.join("scripts/build-rpm.sh").exists());
         assert!(!destination_root.join("scripts/build-pacman.sh").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_copy_prefers_packaged_update_builder_manifest() -> Result<()> {
+        let temp = tempdir()?;
+        let source_root = temp.path().join("source");
+        let destination_root = temp.path().join("destination");
+
+        fs::create_dir_all(source_root.join(".codex-linux"))?;
+        fs::create_dir_all(source_root.join("assets"))?;
+        fs::create_dir_all(source_root.join("record-replay-linux"))?;
+        fs::create_dir_all(source_root.join("scripts"))?;
+        fs::write(source_root.join("assets/codex-linux.png"), b"linux png")?;
+        fs::write(
+            source_root.join("record-replay-linux/Cargo.toml"),
+            b"[package]\nname = \"codex-record-replay-linux\"\n",
+        )?;
+        fs::write(source_root.join("scripts/build-deb.sh"), b"#!/bin/bash\n")?;
+        fs::write(
+            source_root.join(UPDATE_BUILDER_MANIFEST),
+            b"# generated\nassets/codex-linux.png\nrecord-replay-linux/Cargo.toml\n",
+        )?;
+
+        copy_builder_bundle(&source_root, &destination_root)?;
+
+        assert!(destination_root.join("assets/codex-linux.png").exists());
+        assert!(destination_root
+            .join("record-replay-linux/Cargo.toml")
+            .exists());
+        assert!(destination_root.join(UPDATE_BUILDER_MANIFEST).exists());
+        assert!(!destination_root.join("scripts/build-deb.sh").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_manifest_rejects_parent_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let source_root = temp.path().join("source");
+        let destination_root = temp.path().join("destination");
+
+        fs::create_dir_all(source_root.join(".codex-linux"))?;
+        fs::write(source_root.join(UPDATE_BUILDER_MANIFEST), b"../escape\n")?;
+
+        let error = copy_builder_bundle(&source_root, &destination_root)
+            .expect_err("manifest parent path should be rejected");
+        assert!(error
+            .to_string()
+            .contains("Unsafe update-builder manifest entry"));
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_manifest_rejects_absolute_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let source_root = temp.path().join("source");
+        let destination_root = temp.path().join("destination");
+
+        fs::create_dir_all(source_root.join(".codex-linux"))?;
+        fs::write(source_root.join(UPDATE_BUILDER_MANIFEST), b"/tmp/escape\n")?;
+
+        let error = copy_builder_bundle(&source_root, &destination_root)
+            .expect_err("manifest absolute path should be rejected");
+        assert!(error
+            .to_string()
+            .contains("Unsafe update-builder manifest entry"));
         Ok(())
     }
 
