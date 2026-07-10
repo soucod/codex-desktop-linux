@@ -747,6 +747,16 @@ test("legacy Hyprland fallbacks keep dispatcher arguments grouped", () => {
   ])));
 });
 
+test("Hyprland Lua strings escape backslashes and quotes", () => {
+  const patched = applyPetOverlayPatch(currentAvatarOverlayBundleFixture());
+  const { controller } = controllerFromPatchedSource(patched);
+
+  assert.equal(
+    controller.codexPetOverlayLuaString('path\\to"pet'),
+    'path\\\\to\\"pet',
+  );
+});
+
 test("Hyprland callbacks ignore stale overlay windows", () => {
   const calls = [];
   let clientsCallback;

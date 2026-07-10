@@ -10,6 +10,10 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
+const {
+  applyPetOverlayPatch,
+} = require("../linux-features/pet-overlay/patch.js");
+
 // Pin the feature config so a developer's local gitignored features.json
 // cannot change which patch descriptors these core tests exercise.
 process.env.CODEX_LINUX_FEATURES_CONFIG = path.join(
@@ -2389,6 +2393,52 @@ test("patches current opaque window surface background helper shape for Linux", 
   assert.match(patched, /opaqueWindowSurfaceEnabled:n/);
 });
 
+test("keeps the opaque background patch idempotent after pet overlay composition", () => {
+  const source = `${latestAvatarOverlayBundleFixture()}${currentOpaqueWindowSurfaceBackgroundBundle}`;
+  const corePatched = applyLinuxOpaqueBackgroundPatch(source);
+  const petPatched = applyPetOverlayPatch(corePatched);
+  const { value: rerun, warnings } = captureWarns(() =>
+    applyLinuxOpaqueBackgroundPatch(petPatched),
+  );
+
+  assert.notEqual(petPatched, corePatched);
+  assert.equal(rerun, petPatched);
+  assert.deepEqual(warnings, []);
+});
+
+test("patches an opaque background helper composed by pet overlay first", () => {
+  const source = `${latestAvatarOverlayBundleFixture()}${currentOpaqueWindowSurfaceBackgroundBundle}`;
+  const petPatched = applyPetOverlayPatch(source);
+  const { value: corePatched, warnings } = captureWarns(() =>
+    applyLinuxOpaqueBackgroundPatch(petPatched),
+  );
+
+  assert.notEqual(corePatched, petPatched);
+  assert.match(
+    corePatched,
+    /t===`avatarOverlay`\?\{backgroundColor:`#00000000`,backgroundMaterial:null\}:n\?[^;]+:e===`linux`&&!g3\(t\)\?\{backgroundColor:r\?G4:K4,backgroundMaterial:null\}:/,
+  );
+  assert.deepEqual(warnings, []);
+});
+
+test("reports drift in a malformed opaque background helper after pet overlay composition", () => {
+  const source = `${latestAvatarOverlayBundleFixture()}${currentOpaqueWindowSurfaceBackgroundBundle}`;
+  const composed = applyPetOverlayPatch(applyLinuxOpaqueBackgroundPatch(source));
+  const drifted = composed.replace(
+    ":e===`linux`&&!g3(t)?{backgroundColor:r?G4:K4,backgroundMaterial:null}:",
+    ":e===`linux`?{backgroundColor:r?G4:K4,backgroundMaterial:null}:",
+  );
+  const { value: rerun, warnings } = captureWarns(() =>
+    applyLinuxOpaqueBackgroundPatch(drifted),
+  );
+
+  assert.notEqual(drifted, composed);
+  assert.equal(rerun, drifted);
+  assert.deepEqual(warnings, [
+    "WARN: Could not find BrowserWindow background function signature — skipping background patch",
+  ]);
+});
+
 test("does not mistake an unrelated Linux background branch for the current patched helper", () => {
   const unrelatedLinuxBackground =
     "function legacy({platform:e,appearance:t,prefersDarkColors:r}){return e===`linux`&&!x(t)?{backgroundColor:r?D:L,backgroundMaterial:null}:null}";
@@ -2637,6 +2687,21 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.match(patched, /e\.moveTop\(\),e\.showInactive\(\),process\.platform===`linux`&&this\.codexLinuxApplyAvatarCompositorHints\(e\),process\.platform===`linux`&&this\.applyPointerInteractivityPolicy\(\)/);
   assert.doesNotMatch(patched, /codexLinuxRecoverAvatarPointerInteractivity/);
   assert.match(patched, /if\(this\.window!==e\)return;let t=this\.presentationVisibility!=null;this\.codexLinuxStopAvatarPassthroughRecovery\(\),this\.codexLinuxAvatarInputShapeKey=null,this\.codexLinuxAvatarCompositorHintsApplied=!1,this\.codexLinuxAvatarCompositorHintsApplying=!1,this\.cancelMomentum\(\)/);
+});
+
+test("keeps the avatar overlay core patch idempotent after pet overlay composition", () => {
+  const source = `${latestAvatarOverlayBundleFixture()}${currentOpaqueWindowSurfaceBackgroundBundle}`;
+  const corePatched = applyLinuxOpaqueBackgroundPatch(
+    applyLinuxAvatarOverlayMousePassthroughPatch(source),
+  );
+  const petPatched = applyPetOverlayPatch(corePatched);
+  const { value: rerun, warnings } = captureWarns(() =>
+    applyLinuxAvatarOverlayMousePassthroughPatch(petPatched),
+  );
+
+  assert.notEqual(petPatched, corePatched);
+  assert.equal(rerun, petPatched);
+  assert.deepEqual(warnings, []);
 });
 
 test("keeps Linux avatar overlay above the app while reply inputs are focusable", () => {
