@@ -926,6 +926,23 @@ test("default core patch descriptors are grouped and unique", () => {
     descriptors.find((descriptor) => descriptor.id === "linux-computer-use-native-desktop-apps")?.ciPolicy,
     "opt-in",
   );
+  const computerUseInstallFlow = descriptors.find((descriptor) => descriptor.id === "linux-computer-use-install-flow");
+  assert.equal(
+    computerUseInstallFlow.pattern.test(
+      "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-current.js",
+    ),
+    true,
+  );
+  for (const legacyName of [
+    "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~current.js",
+    "app-initial~app-main~remote-conversation-page~new-thread-panel-page~onboarding-page~appgen-~current.js",
+    "plugins-availability-current.js",
+    "use-plugin-install-flow-current.js",
+    "app-initial~app-main~remote-conversation-page~plugin-detail-page~new-thread-panel-page~current.js",
+    "app-initial~app-main~remote-conversation-page~pull-requests-page~plug~current.js",
+  ]) {
+    assert.equal(computerUseInstallFlow.pattern.test(legacyName), false, legacyName);
+  }
   assert.equal(
     descriptors.find((descriptor) => descriptor.id === "linux-terminal-user-path")?.ciPolicy,
     "optional",
@@ -3925,7 +3942,7 @@ test("skips the launch-action patch without throwing when upstream startup archi
   assert.doesNotThrow(() => applyLinuxLaunchActionArgsPatch(source));
 });
 
-test("allows bundled Computer Use on Linux as well as macOS", () => {
+test("registers bundled Computer Use on Linux while preserving the macOS rollout", () => {
   const patched = applyPatchTwice(
     applyLinuxComputerUsePluginGatePatch,
     computerUseGateBundleFixture(),
@@ -3933,9 +3950,9 @@ test("allows bundled Computer Use on Linux as well as macOS", () => {
 
   assert.match(
     patched,
-    /\{installWhenMissing:!0,name:tn,isEnabled:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/,
+    /\{installWhenMissing:!0,name:tn,isEnabled:\(\{features:e,platform:t\}\)=>t===`linux`\|\|t===`darwin`&&e\.computerUse/,
   );
-  assert.doesNotMatch(patched, /t===`darwin`&&e\.computerUse/);
+  assert.doesNotMatch(patched, /=>t===`darwin`&&e\.computerUse/);
 });
 
 test("returns Linux native desktop apps from the Computer Use backend", async () => {
@@ -5853,7 +5870,7 @@ test("patchLinuxAppUpdaterBridge scans build bundles and stays idempotent", () =
   }
 });
 
-test("adds installWhenMissing to an already Linux-enabled Computer Use gate", () => {
+test("upgrades a rollout-gated Linux Computer Use descriptor", () => {
   const source = computerUseGateBundleFixture().replace(
     "{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn}",
     "{name:tn,isEnabled:({features:e,platform:t})=>(t===`darwin`||t===`linux`)&&e.computerUse,migrate:wn}",
@@ -5862,6 +5879,7 @@ test("adds installWhenMissing to an already Linux-enabled Computer Use gate", ()
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
 
   assert.match(patched, /installWhenMissing:!0,name:tn/);
+  assert.match(patched, /=>t===`linux`\|\|t===`darwin`&&e\.computerUse/);
   assert.equal((patched.match(/installWhenMissing:!0,name:tn/g) || []).length, 1);
 });
 
@@ -5897,25 +5915,25 @@ test("patches marketplace selector and plugin gate in one pass", () => {
   );
   assert.match(
     patched,
-    /installWhenMissing:!0,name:tn,isEnabled:\(\{features:n,platform:r\}\)=>\(r===`darwin`\|\|r===`linux`\)&&n\.computerUse,migrate:wn/,
+    /installWhenMissing:!0,name:tn,isEnabled:\(\{features:n,platform:r\}\)=>r===`linux`\|\|r===`darwin`&&n\.computerUse,migrate:wn/,
   );
-  assert.doesNotMatch(patched, /r===`darwin`&&n\.computerUse/);
+  assert.doesNotMatch(patched, /=>r===`darwin`&&n\.computerUse/);
 });
 
 test("keeps scanning Computer Use gates after an already patched match", () => {
   const source = [
     "var tn=`computer-use`;",
-    "var $n=[{installWhenMissing:!0,name:tn,isEnabled:({features:e,platform:t})=>(t===`darwin`||t===`linux`)&&e.computerUse,migrate:on},{name:tn,isEnabled:({features:n,platform:r})=>r===`darwin`&&n.computerUse,migrate:wn}];",
+    "var $n=[{installWhenMissing:!0,name:tn,isEnabled:({features:e,platform:t})=>t===`linux`||t===`darwin`&&e.computerUse,migrate:on},{name:tn,isEnabled:({features:n,platform:r})=>r===`darwin`&&n.computerUse,migrate:wn}];",
   ].join("");
 
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
 
   assert.match(
     patched,
-    /name:tn,isEnabled:\(\{features:n,platform:r\}\)=>\(r===`darwin`\|\|r===`linux`\)&&n\.computerUse,migrate:wn/,
+    /name:tn,isEnabled:\(\{features:n,platform:r\}\)=>r===`linux`\|\|r===`darwin`&&n\.computerUse,migrate:wn/,
   );
   assert.equal((patched.match(/installWhenMissing:!0,name:tn/g) || []).length, 2);
-  assert.doesNotMatch(patched, /r===`darwin`&&n\.computerUse/);
+  assert.doesNotMatch(patched, /=>r===`darwin`&&n\.computerUse/);
 });
 
 test("patches all unpatched Computer Use gates in one pass", () => {
@@ -5927,9 +5945,9 @@ test("patches all unpatched Computer Use gates in one pass", () => {
   const patched = applyLinuxComputerUsePluginGatePatch(source);
 
   assert.equal((patched.match(/installWhenMissing:!0,name:tn/g) || []).length, 2);
-  assert.match(patched, /\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
-  assert.match(patched, /\(r===`darwin`\|\|r===`linux`\)&&n\.computerUse/);
-  assert.doesNotMatch(patched, /===`darwin`&&/);
+  assert.match(patched, /t===`linux`\|\|t===`darwin`&&e\.computerUse/);
+  assert.match(patched, /r===`linux`\|\|r===`darwin`&&n\.computerUse/);
+  assert.doesNotMatch(patched, /=>[tr]===`darwin`&&/);
 });
 
 test("handles reordered Computer Use gate destructuring", () => {
@@ -5939,14 +5957,14 @@ test("handles reordered Computer Use gate destructuring", () => {
   ].join("");
   const alreadyLinuxEnabledSource = [
     "var tn=`computer-use`;",
-    "var $n=[{installWhenMissing:!0,name:tn,isEnabled:({platform:t,features:e})=>(t===`darwin`||t===`linux`)&&e.computerUse,migrate:wn}];",
+    "var $n=[{installWhenMissing:!0,name:tn,isEnabled:({features:e,platform:t})=>t===`linux`||t===`darwin`&&e.computerUse,migrate:wn}];",
   ].join("");
 
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, darwinOnlySource);
 
   assert.match(
     patched,
-    /\{installWhenMissing:!0,name:tn,isEnabled:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:wn\}/,
+    /\{installWhenMissing:!0,name:tn,isEnabled:\(\{features:e,platform:t\}\)=>t===`linux`\|\|t===`darwin`&&e\.computerUse,migrate:wn\}/,
   );
   assert.equal(applyPatchTwice(applyLinuxComputerUsePluginGatePatch, alreadyLinuxEnabledSource), alreadyLinuxEnabledSource);
 });
@@ -5962,7 +5980,7 @@ test("targets literal Computer Use gate names without patching unrelated descrip
   assert.match(patched, /name:other,isEnabled:\(\{features:e,platform:t\}\)=>t===`darwin`&&e\.computerUse,migrate:on/);
   assert.match(
     patched,
-    /name:`computer-use`,isEnabled:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:wn/,
+    /name:`computer-use`,isEnabled:\(\{features:e,platform:t\}\)=>t===`linux`\|\|t===`darwin`&&e\.computerUse,migrate:wn/,
   );
 });
 
@@ -5977,9 +5995,9 @@ test("handles quoted Computer Use gate names", () => {
   const patchedLiteralName = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, literalNameSource);
 
   assert.match(patchedBoundName, /installWhenMissing:!0,name:tn/);
-  assert.match(patchedBoundName, /\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
+  assert.match(patchedBoundName, /t===`linux`\|\|t===`darwin`&&e\.computerUse/);
   assert.match(patchedLiteralName, /installWhenMissing:!0,name:'computer-use'/);
-  assert.match(patchedLiteralName, /\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
+  assert.match(patchedLiteralName, /t===`linux`\|\|t===`darwin`&&e\.computerUse/);
 });
 
 test("patches the current Computer Use gate without touching the Windows-internal descriptor", () => {
@@ -5990,7 +6008,7 @@ test("patches the current Computer Use gate without touching the Windows-interna
 
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
 
-  assert.match(patched, /name:Ze,isEnabled:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:Qn/);
+  assert.match(patched, /name:Ze,isEnabled:\(\{features:e,platform:t\}\)=>t===`linux`\|\|t===`darwin`&&e\.computerUse,migrate:Qn/);
   assert.match(patched, /t\.C\.isInternal\(e\)&&r===`win32`&&n\.computerUse/);
   assert.equal((patched.match(/installWhenMissing:!0,name:Ze/g) || []).length, 2);
 });
@@ -6000,7 +6018,7 @@ test("patches the current isAvailable Computer Use gate shape", () => {
 
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
 
-  assert.match(patched, /name:ft,isAvailable:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:vr/);
+  assert.match(patched, /name:ft,isAvailable:\(\{features:e,platform:t\}\)=>t===`linux`\|\|t===`darwin`&&e\.computerUse,migrate:vr/);
   assert.match(patched, /t\.T\.isInternal\(e\)&&r===`win32`&&n\.computerUse/);
   assert.equal((patched.match(/installWhenMissing:!0,name:ft/g) || []).length, 2);
 });
@@ -6014,7 +6032,7 @@ test("patches the Electron 42 Computer Use gate with descriptor metadata fields"
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
 
   assert.match(patched, /autoInstallOptOutKey:t\.No\(t\.Oo\),installWhenMissing:!0,installWhenMissingRequiresOptIn:!0,name:t\.Oo/);
-  assert.match(patched, /isAvailable:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:ha/);
+  assert.match(patched, /isAvailable:\(\{features:e,platform:t\}\)=>t===`linux`\|\|t===`darwin`&&e\.computerUse,migrate:ha/);
   assert.match(patched, /isAvailable:\(\{features:e,platform:t\}\)=>t===`win32`&&e\.computerUse/);
 });
 
@@ -6303,7 +6321,7 @@ test("reports missing Chrome plugin auto-install gate as optional drift", () => 
   }
 });
 
-test("patches Computer Use gates that use imported namespace constants", () => {
+test("registers Linux Computer Use independently of the upstream rollout", () => {
   const source = [
     "var lt=`computer-use`;",
     "var Ur=[{autoInstallOptOutKey:e.Nn(e.Dn),forceReload:!0,installWhenMissing:!0,name:e.Dn,isAvailable:({features:e})=>e.inAppBrowserUseAllowed,migrate:$n},{name:e.kn,isAvailable:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:mr},{installWhenMissing:!0,name:e.kn,isAvailable:({buildFlavor:e,features:n,platform:r})=>t.T.isInternal(e)&&r===`win32`&&n.computerUse},{name:e.An,isAvailable:()=>!0}];",
@@ -6311,7 +6329,7 @@ test("patches Computer Use gates that use imported namespace constants", () => {
 
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
 
-  assert.match(patched, /installWhenMissing:!0,name:e\.kn,isAvailable:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:mr/);
+  assert.match(patched, /installWhenMissing:!0,name:e\.kn,isAvailable:\(\{features:e,platform:t\}\)=>t===`linux`\|\|t===`darwin`&&e\.computerUse,migrate:mr/);
   assert.match(patched, /t\.T\.isInternal\(e\)&&r===`win32`&&n\.computerUse/);
   assert.equal((patched.match(/installWhenMissing:!0,name:e\.kn/g) || []).length, 2);
 });
@@ -6838,7 +6856,7 @@ test("does not enable unrelated native desktop app queries on Linux", () => {
   assert.equal(applyLinuxComputerUseRendererAvailabilityPatch(source), source);
 });
 
-test("allows current required-feature Computer Use gate on Linux", () => {
+test("allows the current Computer Use platform while preserving upstream gates", () => {
   const source =
     "function Rj(e){return e===`macOS`||e===`windows`}" +
     "function zj(e){let t=(0,Uj.c)(16),{enabled:n,hostId:r}=e,i=n===void 0?!0:n,{isLoading:a,platform:o}=Xt(),s=cn(`1506311413`),c;t[0]===r?c=t[1]:(c={featureName:`computer_use`,hostId:r},t[0]=r,t[1]=c);let l=Fj(c),u=o===`windows`&&!a,d=i&&u,f;t[2]===d?f=t[3]:(f={enabled:d},t[2]=d,t[3]=f);let p=Bj(f),m=l.isLoading||u&&p.isLoading,h=l.enabled&&(!u||p.enabled),g;t[4]!==h||t[5]!==i||t[6]!==m||t[7]!==s||t[8]!==a||t[9]!==o?(g=Hj({areRequiredFeaturesEnabled:h,enabled:i,isAnyFeatureLoading:m,isComputerUseGateEnabled:s,isHostCompatiblePlatform:Rj(o),isPlatformLoading:a,windowType:`electron`}),t[4]=h,t[5]=i,t[6]=m,t[7]=s,t[8]=a,t[9]=o,t[10]=g):g=t[10];return g}";
@@ -6847,8 +6865,9 @@ test("allows current required-feature Computer Use gate on Linux", () => {
 
   assert.match(
     patched,
-    /g=Hj\(\{areRequiredFeaturesEnabled:o===`linux`\|\|h,enabled:i,isAnyFeatureLoading:o===`linux`\?!1:m,isComputerUseGateEnabled:o===`linux`\|\|s,isHostCompatiblePlatform:o===`linux`\|\|Rj\(o\),isPlatformLoading:a,windowType:`electron`\}\)/,
+    /g=Hj\(\{areRequiredFeaturesEnabled:h,enabled:i,isAnyFeatureLoading:m,isComputerUseGateEnabled:s,isHostCompatiblePlatform:o===`linux`\|\|Rj\(o\),isPlatformLoading:a,windowType:`electron`\}\)/,
   );
+  assert.doesNotMatch(patched, /areRequiredFeaturesEnabled:o===`linux`|isComputerUseGateEnabled:o===`linux`/);
 });
 
 function externalOpenChildClosingWith(code) {
@@ -7421,7 +7440,7 @@ test("patchMainBundleSource skips Computer Use feature patch by default", () => 
       patched,
       /return n===`linux`\?\{\.\.\.e,computerUse:!0,computerUseNodeRepl:!0\}/,
     );
-    assert.match(patched, /\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
+    assert.match(patched, /t===`linux`\|\|t===`darwin`&&e\.computerUse/);
   });
 });
 
@@ -7440,7 +7459,7 @@ test("patchMainBundleSource applies Computer Use feature patch when env var is s
       patched,
       /return n===`linux`\?\{\.\.\.e,computerUse:!0,computerUseNodeRepl:!0\}/,
     );
-    assert.match(patched, /\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
+    assert.match(patched, /t===`linux`\|\|t===`darwin`&&e\.computerUse/);
   });
 });
 
@@ -7521,7 +7540,7 @@ test("patchMainBundleSource keeps non-icon patches active without an icon asset"
     patched,
     /process\.platform===`linux`&&process\.env\.CODEX_LINUX_MULTI_LAUNCH!==`1`&&!n\.app\.requestSingleInstanceLock\(\)/,
   );
-  assert.match(patched, /\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
+  assert.match(patched, /t===`linux`\|\|t===`darwin`&&e\.computerUse/);
   assert.doesNotMatch(patched, /setIcon\(process\.resourcesPath\+`\/\.\.\/content\/webview\/assets\//);
   assert.doesNotMatch(
     patched,
@@ -7724,7 +7743,7 @@ test("patchExtractedApp scans current Computer Use settings bundles when UI is e
       fs.writeFileSync(
         path.join(
           assetsDir,
-          "app-initial~app-main~remote-conversation-page~new-thread-panel-page~onboarding-page~appgen-~current.js",
+          "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-current.js",
         ),
         "function _p(e){return e===`macOS`||e===`windows`}" +
           "function vp(e){let t=(0,Sp.c)(16),{enabled:n,hostId:r}=e,i=n===void 0?!0:n,{isLoading:a,platform:o}=ba(),s=gr(`1506311413`),c;t[0]===r?c=t[1]:(c={featureName:`computer_use`,hostId:r},t[0]=r,t[1]=c);let l=mp(c),u=o===`windows`&&!a,d=i&&u,f;t[2]===d?f=t[3]:(f={enabled:d},t[2]=d,t[3]=f);let p=yp(f),m=l.isLoading||u&&p.isLoading,h=l.enabled&&(!u||p.enabled),g;t[4]!==h||t[5]!==i||t[6]!==m||t[7]!==s||t[8]!==a||t[9]!==o?(g=xp({areRequiredFeaturesEnabled:h,enabled:i,isAnyFeatureLoading:m,isComputerUseGateEnabled:s,isHostCompatiblePlatform:_p(o),isPlatformLoading:a,windowType:`electron`}),t[4]=h,t[5]=i,t[6]=m,t[7]=s,t[8]=a,t[9]=o,t[10]=g):g=t[10];return g}",
@@ -7755,11 +7774,11 @@ test("patchExtractedApp scans current Computer Use settings bundles when UI is e
         fs.readFileSync(
           path.join(
             assetsDir,
-            "app-initial~app-main~remote-conversation-page~new-thread-panel-page~onboarding-page~appgen-~current.js",
+            "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-current.js",
           ),
           "utf8",
         ),
-        /g=xp\(\{areRequiredFeaturesEnabled:o===`linux`\|\|h,enabled:i,isAnyFeatureLoading:o===`linux`\?!1:m,isComputerUseGateEnabled:o===`linux`\|\|s,isHostCompatiblePlatform:o===`linux`\|\|_p\(o\),isPlatformLoading:a,windowType:`electron`\}\)/,
+        /g=xp\(\{areRequiredFeaturesEnabled:h,enabled:i,isAnyFeatureLoading:m,isComputerUseGateEnabled:s,isHostCompatiblePlatform:o===`linux`\|\|_p\(o\),isPlatformLoading:a,windowType:`electron`\}\)/,
       );
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
