@@ -5355,23 +5355,36 @@ test("restarts late-event hydration when a pending queue exists without an in-fl
   assert.deepEqual(updatedConversations, ["thread-a"]);
 });
 
-test("discovers app-server conversation hydration as a core Linux webview patch", () => {
-  const descriptor = corePatchDescriptors().find(
-    (patch) => patch.id === "linux-app-server-conversation-hydration",
-  );
+test("discovers current app-server conversation core Linux webview patches", () => {
+  const legacyConversationAsset =
+    "app-initial~app-main~worktree-init-v2-page~remote-conversation-page~new-thread-panel-page~o~bj5tp28r-Dcs9S3fj.js";
+  const legacyLatestConversationAsset =
+    "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~glxlkd48-Bty5T9_s.js";
+  const currentConversationAsset =
+    "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-y0KJWbm3.js";
+  const oldConversationAsset =
+    "app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~h59fr3q5-Cm3GYhJA.js";
+  const projectlessRemoteTaskAsset =
+    "app-initial~app-main~worktree-init-v2-page~remote-conversation-page~pull-requests-page~plug~kmtatxxf-DEE2TwPG.js";
+  const latestProjectlessRemoteTaskAsset =
+    "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-MXsOJYYa.js";
 
-  assert.ok(descriptor);
-  assert.equal(descriptor.phase, "webview-asset");
-  assert.equal(descriptor.ciPolicy, "optional");
-  assert.match(String(descriptor.pattern), /thread-app-shell-chrome/);
-  assert.equal(
-    descriptor.pattern.test(
-      "app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~h59fr3q5-Cm3GYhJA.js",
-    ),
-    true,
-  );
-  assert.equal(descriptor.pattern.test("app-server-manager-signals-test.js"), false);
-  assert.equal(descriptor.pattern.test("remote-connections-settings-fixture.js"), false);
+  for (const id of ["linux-app-server-conversation-hydration", "linux-completed-item-recovery"]) {
+    const descriptor = corePatchDescriptors().find((patch) => patch.id === id);
+
+    assert.ok(descriptor);
+    assert.equal(descriptor.phase, "webview-asset");
+    assert.equal(descriptor.ciPolicy, "optional");
+    assert.match(String(descriptor.pattern), /b76hmflu/);
+    assert.equal(descriptor.pattern.test(currentConversationAsset), true);
+    assert.equal(descriptor.pattern.test(legacyConversationAsset), false);
+    assert.equal(descriptor.pattern.test(legacyLatestConversationAsset), false);
+    assert.equal(descriptor.pattern.test(oldConversationAsset), false);
+    assert.equal(descriptor.pattern.test(projectlessRemoteTaskAsset), false);
+    assert.equal(descriptor.pattern.test(latestProjectlessRemoteTaskAsset), false);
+    assert.equal(descriptor.pattern.test("app-server-manager-signals-test.js"), false);
+    assert.equal(descriptor.pattern.test("remote-connections-settings-fixture.js"), false);
+  }
 });
 
 test("recovers completed stream items that arrive after local state lost their started item", () => {
@@ -8623,6 +8636,64 @@ test("criticalFailuresFromReport agrees with validateReport and skips non-applic
   assert.ok(failures.some((failure) => failure.startsWith("req-bad:")));
   assert.ok(!failures.some((failure) => failure.startsWith("req-not-applicable:")));
   assert.ok(!failures.some((failure) => failure.startsWith("opt-bad:")));
+});
+
+test("validateReport can require enabled features and successful patch entries", () => {
+  const report = {
+    enabledFeatures: ["remote-mobile-control"],
+    patches: [
+      {
+        name: "feature:remote-mobile-control:linux-remote-control-load-gate",
+        status: "applied",
+        ciPolicy: "optional",
+      },
+      {
+        name: "linux-app-server-conversation-hydration",
+        status: "already-applied",
+        ciPolicy: "optional",
+      },
+      {
+        name: "feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task",
+        status: "skipped-optional",
+        ciPolicy: "optional",
+        reason: "missing sidebar project groups bundle",
+      },
+    ],
+  };
+
+  const failures = validateReport(report, "feature-probe", {
+    requiredAppliedPatches: [
+      "feature:remote-mobile-control:linux-remote-control-load-gate",
+      "linux-app-server-conversation-hydration",
+    ],
+    requiredEnabledFeatures: ["remote-mobile-control", "missing-feature"],
+    requiredSuccessfulPatches: [
+      "feature:remote-mobile-control:linux-remote-control-load-gate",
+      "linux-app-server-conversation-hydration",
+      "feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task",
+      "feature:remote-mobile-control:missing-entry",
+    ],
+  });
+
+  assert.ok(
+    !failures.some((failure) =>
+      failure.startsWith("feature:remote-mobile-control:linux-remote-control-load-gate:"),
+    ),
+  );
+  assert.ok(
+    failures.includes(
+      "linux-app-server-conversation-hydration: expected applied, got already-applied",
+    ),
+  );
+  assert.ok(failures.includes("feature missing-feature: not enabled in patch report"));
+  assert.ok(
+    failures.some((failure) =>
+      failure.startsWith(
+        "feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task: skipped-optional",
+      ),
+    ),
+  );
+  assert.ok(failures.includes("feature:remote-mobile-control:missing-entry: missing from patch report"));
 });
 
 test("terminal user PATH patch drift is reported as optional", () => {

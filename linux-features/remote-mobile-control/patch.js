@@ -54,7 +54,8 @@ const REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER = "codexLinuxRemoteControlResetMo
 const REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_MARKER = "codexLinuxRemoteMobileAppServerArgs";
 const REMOTE_MOBILE_APP_SERVER_ARGS_NEEDLE =
   "[`-c`,`features.code_mode_host=true`,`app-server`,`--analytics-default-enabled`]";
-const REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER = "codexLinuxRemoteMobileProjectlessRemoteTaskId";
+const REMOTE_MOBILE_CONVERSATION_ASSET_PATTERN =
+  /^app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-[^.]+\.js$/u;
 const REMOTE_CONTROL_SELECTED_TAB_NEEDLE =
   "function rr({selectedConnectionsTab:e,showControlThisMacTab:t,showRemoteControlConnectionsSection:n,showTabbedSshPage:r}){return n?e===`control-this-mac`&&!t||e===`ssh`&&!r?`access-other-devices`:e:`ssh`}";
 const REMOTE_CONTROL_SELECTED_TAB_REPLACEMENT =
@@ -1536,49 +1537,6 @@ function applyLinuxRemoteMobileActiveStatusPatch(source) {
   );
 }
 
-function applyLinuxRemoteMobileProjectlessRemoteTaskPatch(source) {
-  if (source.includes(REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER)) {
-    return source;
-  }
-  if (!source.includes("No owner repo found for remote task")) {
-    return source;
-  }
-
-  const currentPattern =
-    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2,\3\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\5\);if\(!\7\)\{([A-Za-z_$][\w$]*)\.has\(\2\.task\.id\)\|\|\(\9\.add\(\2\.task\.id\),([A-Za-z_$][\w$]*)\.warning\(`No owner repo found for remote task`,\{safe:\{taskId:\2\.task\.id\},sensitive:\{\}\}\)\);return\}/u;
-  const match = source.match(currentPattern);
-  if (match == null) {
-    console.warn("WARN: Could not find remote task owner-repo grouping needle - skipping projectless remote task patch");
-    return source;
-  }
-
-  const [
-    needle,
-    functionName,
-    remoteTaskVar,
-    remoteProjectsByLabelVar,
-    projectGroupsVar,
-    remoteProjectVar,
-    remoteProjectForTaskFn,
-    ownerRepoVar,
-    ownerRepoForProjectFn,
-  ] = match;
-
-  return source.replace(
-    needle,
-    [
-      `function ${functionName}(${remoteTaskVar},${remoteProjectsByLabelVar},${projectGroupsVar}){`,
-      `let ${remoteProjectVar}=${remoteProjectForTaskFn}(${remoteTaskVar},${remoteProjectsByLabelVar}),`,
-      `${ownerRepoVar}=${ownerRepoForProjectFn}(${remoteProjectVar});`,
-      `if(!${ownerRepoVar}){`,
-      `let ${REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER}=${remoteTaskVar}.task?.id??${remoteTaskVar}.conversationId??${remoteTaskVar}.key??\`unknown\`,`,
-      `codexLinuxRemoteMobileProjectlessRemoteTaskLabel=${remoteTaskVar}.task?.task_status_display?.environment_label??${remoteTaskVar}.task?.title??\`Remote task\`,`,
-      `codexLinuxRemoteMobileProjectlessRemoteTaskGroup={projectId:\`remote-task:\${${REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER}}\`,projectKind:\`remote\`,label:codexLinuxRemoteMobileProjectlessRemoteTaskLabel,path:\`\${${REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER}}\`,repositoryData:null,isCodexWorktree:!1,threadKeys:[]};`,
-      `${projectGroupsVar}.push(codexLinuxRemoteMobileProjectlessRemoteTaskGroup),codexLinuxRemoteMobileProjectlessRemoteTaskGroup.threadKeys.push(${remoteTaskVar}.key);return}`,
-    ].join(""),
-  );
-}
-
 module.exports = [
   {
     id: "linux-remote-control-device-key",
@@ -1618,7 +1576,7 @@ module.exports = [
   {
     id: "linux-remote-control-load-gate",
     phase: "webview-asset",
-    pattern: /^app-initial~app-main~hotkey-window-new-thread-page~hotkey-window-home-page~composer-utility-bar-.*\.js$/,
+    pattern: REMOTE_MOBILE_CONVERSATION_ASSET_PATTERN,
     order: 20_118,
     ciPolicy: "optional",
     missingDescription: "remote-control loader gate bundle",
@@ -1698,7 +1656,7 @@ module.exports = [
   {
     id: "linux-remote-mobile-conversation-hydration",
     phase: "webview-asset",
-    pattern: /^app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~.*\.js$/,
+    pattern: REMOTE_MOBILE_CONVERSATION_ASSET_PATTERN,
     order: 20_150,
     ciPolicy: "optional",
     missingDescription: "app-server manager signals bundle",
@@ -1708,7 +1666,7 @@ module.exports = [
   {
     id: "linux-remote-control-status-read-guard",
     phase: "webview-asset",
-    pattern: /^app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-.*\.js$/,
+    pattern: REMOTE_MOBILE_CONVERSATION_ASSET_PATTERN,
     order: 20_151,
     ciPolicy: "optional",
     missingDescription: "app-server manager signals bundle",
@@ -1755,16 +1713,6 @@ module.exports = [
     skipDescription: "Linux remote-mobile active status patch",
     apply: applyLinuxRemoteMobileActiveStatusPatch,
   },
-  {
-    id: "linux-remote-mobile-projectless-remote-task",
-    phase: "webview-asset",
-    pattern: /^app-initial~app-main~hotkey-window-new-thread-page~hotkey-window-home-page~composer-utility-bar-.*\.js$/,
-    order: 20_170,
-    ciPolicy: "optional",
-    missingDescription: "sidebar project groups bundle",
-    skipDescription: "Linux remote-mobile projectless remote task patch",
-    apply: applyLinuxRemoteMobileProjectlessRemoteTaskPatch,
-  },
 ];
 
 module.exports.applyLinuxRemoteControlDeviceKeyPatch = applyLinuxRemoteControlDeviceKeyPatch;
@@ -1794,5 +1742,3 @@ module.exports.applyLinuxRemoteControlSshInstallActionPatch = applyLinuxRemoteCo
 module.exports.applyLinuxRemoteControlSshInstallReleasePatch = applyLinuxRemoteControlSshInstallReleasePatch;
 module.exports.applyLinuxRemoteControlSettingsUxPatch = applyLinuxRemoteControlSettingsUxPatch;
 module.exports.applyLinuxRemoteControlSelectedTabPatch = applyLinuxRemoteControlSelectedTabPatch;
-module.exports.applyLinuxRemoteMobileProjectlessRemoteTaskPatch =
-  applyLinuxRemoteMobileProjectlessRemoteTaskPatch;

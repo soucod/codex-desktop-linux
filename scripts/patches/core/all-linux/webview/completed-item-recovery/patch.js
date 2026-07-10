@@ -13,7 +13,7 @@ module.exports = [
     phase: "webview-asset",
     order: 1043,
     ciPolicy: "optional",
-    pattern: /^app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~.*\.js$/,
+    pattern: /^app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-[^.]+\.js$/,
     missingDescription: "app-server conversation manager bundle",
     skipDescription: "Linux completed item recovery patch",
     apply: applyLinuxCompletedItemRecoveryPatch,
