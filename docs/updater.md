@@ -135,7 +135,10 @@ PACKAGE_WITH_UPDATER=0 make update-native
 ```
 
 `make update-native` runs `git pull --ff-only`, regenerates `codex-app/` from a
-fresh upstream `Codex.dmg`, builds the native package, and installs it.
+fresh upstream `Codex.dmg`, builds the native package, and installs it. The
+rebuild uses the shared [upstream DMG acceptance profile](upstream-dmg-acceptance.md);
+rejected and inconclusive candidates never replace the working generated app
+or advance to package installation.
 
 ## Service Controls
 

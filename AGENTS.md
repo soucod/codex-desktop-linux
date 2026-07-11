@@ -119,11 +119,16 @@ Primary human docs: [architecture](docs/architecture.md),
   explicit retry path; avoid auto-retrying every reconcile cycle.
 - Manual rollback uses the last-known-good package recorded in updater state
   and the same format-specific command layer as normal installs.
+- Local installs, updater rebuilds, and scheduled CI use the same upstream DMG
+  acceptance profile. Build into a sibling candidate and promote it only after
+  an `accepted` or `accepted_with_warnings` verdict; optional drift remains
+  fail-soft and rejected/inconclusive candidates must not replace the working
+  app.
 
 ## Generated Artifacts
 
 Treat these as generated or local runtime state, not primary source:
-`codex-app/`, `codex-app-next/`, `codex-*-app/`, `dist/`,
+`codex-app/`, `codex-app-next/`, `.codex-app.candidate-*`, `codex-*-app/`, `dist/`,
 `dist/appimage.AppDir/`, `dist-next/rebuild/`, `target/`, `Codex.dmg`,
 `linux-features/features.json`, `linux-features/local/`,
 `codex-app/.codex-linux/linux-features-staged.json`, updater config/state/log

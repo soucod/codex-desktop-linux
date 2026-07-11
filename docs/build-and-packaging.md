@@ -75,10 +75,13 @@ Equivalent direct commands:
 
 The default path stores upstream DMG headers, plus a hash of the upstream URL,
 next to `Codex.dmg` and refreshes the cached file when that upstream fingerprint
-changes. `--fresh` still forces a cache removal before rebuilding, and an
+changes. Every command builds a sibling candidate and runs the shared
+[upstream DMG acceptance profile](upstream-dmg-acceptance.md) before replacing
+`codex-app/`. A rejected or inconclusive candidate leaves the working app
+unchanged. `--fresh` still forces a cache removal before rebuilding, and an
 explicit `DMG=/path/to/Codex.dmg` uses that file exactly.
-Native install shortcuts use `--fresh --reuse-dmg`, so they clean the generated
-app directory while still reusing the cached DMG when upstream metadata matches.
+Native install shortcuts use `--fresh --reuse-dmg`, so they build a clean
+candidate while still reusing the cached DMG when upstream metadata matches.
 
 For deterministic test rounds, set `CODEX_DMG_REFRESH_MODE=pinned`. Pinned mode
 reuses the existing cached `Codex.dmg` verbatim, skips upstream metadata checks,

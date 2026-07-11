@@ -49,6 +49,15 @@ For patch report validation:
 scripts/ci/validate-patch-report.js codex-app/.codex-linux/patch-report.json
 ```
 
+Local installs and scheduled CI share `scripts/validate-upstream-dmg.js` and
+`scripts/lib/upstream-dmg-release-profile.js`. Exercise decision and issue
+behavior with:
+
+```bash
+node --test scripts/ci/upstream-dmg-acceptance.test.js
+node --test scripts/ci/upstream-dmg-issue.test.js
+```
+
 ## Rust Crates
 
 Updater:

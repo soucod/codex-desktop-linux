@@ -625,6 +625,8 @@ SCRIPT
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/patch-browser-client-iab-socket-scope.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/node-runtime.sh"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/upstream-dmg-intel.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/upstream-dmg-acceptance.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/validate-upstream-dmg.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/linux-update-bridge-patch.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/patch-report.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/rebuild-report.sh"
@@ -1689,7 +1691,6 @@ test_make_build_app_uses_installer_download_flow_by_default() {
     local workspace="$TMP_DIR/make-build-app"
     local install_log="$workspace/install-args.log"
     local first_line
-    local second_line
 
     mkdir -p "$workspace"
 
@@ -2407,19 +2408,60 @@ SCRIPT
     REBUILD_REPORT_DIR="$workspace/report" \
         bash "$repo/scripts/rebuild-candidate.sh" >"$workspace/default.out" 2>&1
     first_line="$(sed -n '1p' "$workspace/default.log")"
-    second_line="$(sed -n '2p' "$workspace/default.log")"
-    [[ "$first_line" != *"Codex.dmg"* ]] || fail "Default inspect should let installer validate the cache: $first_line"
-    [[ "$second_line" == *"<$repo/Codex.dmg>"* ]] || fail "Default build should pin the validated cache: $second_line"
-    assert_contains "$workspace/default.out" "Using validated DMG for build"
+    [ "$first_line" = "CALL:" ] || fail "Default rebuild should let the transactional installer validate its cache: $first_line"
 
     TEST_REBUILD_LOG="$workspace/explicit.log" \
     CODEX_NEXT_APP_DIR="$workspace/next-explicit" \
     REBUILD_REPORT_DIR="$workspace/report-explicit" \
         bash "$repo/scripts/rebuild-candidate.sh" "$explicit_dmg" >"$workspace/explicit.out" 2>&1
     first_line="$(sed -n '1p' "$workspace/explicit.log")"
-    second_line="$(sed -n '2p' "$workspace/explicit.log")"
-    [[ "$first_line" == *"<$explicit_realpath>"* ]] || fail "Explicit inspect should receive explicit DMG: $first_line"
-    [[ "$second_line" == *"<$explicit_realpath>"* ]] || fail "Explicit build should receive explicit DMG: $second_line"
+    [[ "$first_line" == *"<$explicit_realpath>"* ]] || fail "Explicit transactional build should receive explicit DMG: $first_line"
+}
+
+test_candidate_install_is_transactional() {
+    info "Checking transactional candidate promotion and rollback"
+    local workspace="$TMP_DIR/candidate-install"
+    mkdir -p "$workspace/final" "$workspace/candidate"
+    printf '%s' "old" >"$workspace/final/version"
+    printf '%s' "new" >"$workspace/candidate/version"
+
+    (
+        info() { :; }
+        warn() { :; }
+        error() { echo "$*" >&2; exit 1; }
+        assert_install_target_not_running() { :; }
+        INSTALL_DIR="$workspace/final"
+        # shellcheck source=scripts/lib/candidate-install.sh
+        . "$REPO_DIR/scripts/lib/candidate-install.sh"
+        promote_candidate_install "$workspace/candidate" "$workspace/final"
+        [ "$(cat "$workspace/final/version")" = "new" ] || fail "Expected accepted candidate to be promoted"
+        [ -n "$PROMOTED_BACKUP_APP_DIR" ] || fail "Expected previous app backup"
+        [ "$(cat "$PROMOTED_BACKUP_APP_DIR/version")" = "old" ] || fail "Expected backup to preserve previous app"
+    )
+
+    rm -rf "$workspace/final" "$workspace/candidate" "$workspace"/final.backup-*
+    mkdir -p "$workspace/final" "$workspace/candidate"
+    printf '%s' "old" >"$workspace/final/version"
+    printf '%s' "new" >"$workspace/candidate/version"
+    (
+        info() { :; }
+        warn() { :; }
+        error() { echo "$*" >&2; exit 1; }
+        assert_install_target_not_running() { :; }
+        INSTALL_DIR="$workspace/final"
+        # shellcheck source=scripts/lib/candidate-install.sh
+        . "$REPO_DIR/scripts/lib/candidate-install.sh"
+        mv() {
+            if [ "$1" = "$workspace/candidate" ] && [ "$2" = "$workspace/final" ]; then
+                return 1
+            fi
+            command mv "$@"
+        }
+        if promote_candidate_install "$workspace/candidate" "$workspace/final"; then
+            fail "Expected simulated candidate promotion failure"
+        fi
+        [ "$(cat "$workspace/final/version")" = "old" ] || fail "Expected failed promotion to restore previous app"
+    )
 }
 
 test_native_shortcut_targets_compose_existing_flows() {
@@ -8548,6 +8590,7 @@ main() {
     test_fresh_pinned_dmg_preserves_cached_dmg_metadata
     test_fresh_reuse_dmg_uses_cache_when_metadata_matches
     test_rebuild_candidate_uses_validated_default_dmg
+    test_candidate_install_is_transactional
     test_native_shortcut_targets_compose_existing_flows
     test_fedora_dependency_bootstrap_installs_rpmbuild
     test_fedora_atomic_rpm_ostree_target_detection

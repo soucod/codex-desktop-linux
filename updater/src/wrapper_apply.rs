@@ -145,7 +145,7 @@ async fn apply_user_local(
     if let Some(helper) = user_local_update_helper() {
         info!(helper = %helper.display(), "applying wrapper update via user-local helper");
         let mut cmd = Command::new(&helper);
-        cmd.arg("--quiet");
+        cmd.arg("--quiet").env("CODEX_ACCEPTANCE_OVERRIDE", "0");
         // The contrib helper honors a caller-set CODEX_LINUX_FEATURES_CONFIG over
         // its repo-local default, so the in-app picker's selection wins.
         if let Some(config_path) = &feature_config {
@@ -179,6 +179,7 @@ async fn apply_user_local(
     info!(app_dir = %app_dir.display(), "rebuilding user-local app in place via install.sh");
     let mut cmd = Command::new(&install_sh);
     cmd.current_dir(&wrapper_src)
+        .env("CODEX_ACCEPTANCE_OVERRIDE", "0")
         .env("CODEX_INSTALL_ALLOW_RUNNING", "1")
         .env("CODEX_INSTALL_ROOT", &install_root)
         .env("CODEX_INSTALL_DIR", &app_dir);

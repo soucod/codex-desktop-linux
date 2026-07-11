@@ -1,0 +1,101 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const test = require("node:test");
+
+const { fingerprintMarker, reconcileUpstreamDmgIssue } = require("./upstream-dmg-issue.js");
+
+function decision(verdict, sha, runId = "100") {
+  return {
+    verdict,
+    dmg: { sha256: sha, appVersion: "1.2.3", httpIdentity: { key: "current" } },
+    blockers: verdict === "rejected" ? [{ check: "core", reason: "required patch failed" }] : [],
+    warnings: [],
+    run: { id: runId, url: `https://example.test/runs/${runId}` },
+  };
+}
+
+function fakeGithub(initialIssues = []) {
+  const calls = [];
+  let nextNumber = 50;
+  const issues = initialIssues.map((issue) => ({ ...issue }));
+  const rest = { issues: {} };
+  rest.issues.listForRepo = async () => ({ data: issues });
+  rest.issues.getLabel = async () => ({ data: {} });
+  rest.issues.createLabel = async (args) => { calls.push(["createLabel", args]); return { data: {} }; };
+  rest.issues.createComment = async (args) => { calls.push(["comment", args]); return { data: {} }; };
+  rest.issues.update = async (args) => {
+    calls.push(["update", args]);
+    const issue = issues.find((item) => item.number === args.issue_number);
+    if (issue) Object.assign(issue, args);
+    return { data: issue };
+  };
+  rest.issues.create = async (args) => {
+    calls.push(["create", args]);
+    const issue = { ...args, number: nextNumber++, state: "open" };
+    issues.push(issue);
+    return { data: issue };
+  };
+  return { github: { rest }, calls, issues };
+}
+
+test("creates one issue for a rejected current fingerprint", async () => {
+  const fixture = fakeGithub();
+  const sha = "a".repeat(64);
+  const result = await reconcileUpstreamDmgIssue({
+    github: fixture.github, repo: { owner: "o", repo: "r" }, decision: decision("rejected", sha), currentHttpIdentityKey: "current",
+  });
+  assert.equal(result.action, "created");
+  assert.equal(fixture.calls.filter(([name]) => name === "create").length, 1);
+});
+
+test("closes old fingerprints before creating the new issue", async () => {
+  const oldSha = "b".repeat(64);
+  const fixture = fakeGithub([{ number: 4, state: "open", body: fingerprintMarker(oldSha) }]);
+  await reconcileUpstreamDmgIssue({
+    github: fixture.github, repo: { owner: "o", repo: "r" }, decision: decision("rejected", "c".repeat(64)), currentHttpIdentityKey: "current",
+  });
+  assert.ok(fixture.calls.some(([name, args]) => name === "update" && args.issue_number === 4 && args.state === "closed"));
+  assert.ok(fixture.calls.some(([name]) => name === "create"));
+});
+
+test("reopens the matching closed issue instead of duplicating it", async () => {
+  const sha = "d".repeat(64);
+  const fixture = fakeGithub([{ number: 7, state: "closed", body: fingerprintMarker(sha) }]);
+  const result = await reconcileUpstreamDmgIssue({
+    github: fixture.github, repo: { owner: "o", repo: "r" }, decision: decision("rejected", sha), currentHttpIdentityKey: "current",
+  });
+  assert.equal(result.action, "reopened");
+  assert.equal(fixture.calls.filter(([name]) => name === "create").length, 0);
+});
+
+test("accepted candidates close old drift issues without creating a new one", async () => {
+  const fixture = fakeGithub([{ number: 9, state: "open", body: fingerprintMarker("e".repeat(64)) }]);
+  const result = await reconcileUpstreamDmgIssue({
+    github: fixture.github, repo: { owner: "o", repo: "r" }, decision: decision("accepted", "f".repeat(64)), currentHttpIdentityKey: "current",
+  });
+  assert.equal(result.action, "closed-resolved");
+  assert.equal(fixture.calls.filter(([name]) => name === "create").length, 0);
+});
+
+test("does not add a duplicate comment for the same workflow run", async () => {
+  const sha = "2".repeat(64);
+  const current = decision("rejected", sha, "123");
+  const fixture = fakeGithub([{ number: 11, state: "open", body: `${fingerprintMarker(sha)}\n<!-- upstream-dmg-run:123 -->` }]);
+  const result = await reconcileUpstreamDmgIssue({
+    github: fixture.github, repo: { owner: "o", repo: "r" }, decision: current, currentHttpIdentityKey: "current",
+  });
+  assert.equal(result.action, "updated");
+  assert.equal(fixture.calls.filter(([name]) => name === "comment").length, 0);
+});
+
+test("does not mutate issues for stale or inconclusive runs", async () => {
+  for (const [verdict, identity] of [["rejected", "newer"], ["inconclusive", "current"]]) {
+    const fixture = fakeGithub();
+    const result = await reconcileUpstreamDmgIssue({
+      github: fixture.github, repo: { owner: "o", repo: "r" }, decision: decision(verdict, "1".repeat(64)), currentHttpIdentityKey: identity,
+    });
+    assert.match(result.action, /^ignored-/);
+    assert.equal(fixture.calls.length, 0);
+  }
+});

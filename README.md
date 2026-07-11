@@ -306,6 +306,10 @@ Use a local DMG:
 make build-app DMG=/path/to/Codex.dmg
 ```
 
+Local builds are transactional: the candidate must pass the same
+[upstream DMG acceptance profile](docs/upstream-dmg-acceptance.md) used by the
+scheduled GitHub workflow before it replaces the working `codex-app/`.
+
 Build and install a package:
 
 ```bash

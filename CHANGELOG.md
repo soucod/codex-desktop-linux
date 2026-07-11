@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- A shared upstream DMG acceptance profile now produces the same structured
+  decision for local installs, updater rebuilds, and scheduled CI. Scheduled
+  rejections create one fingerprinted drift issue and supersede issues for
+  older DMGs without turning optional patch drift into a blocker.
 - Nix module configurations can select the opt-in `mcp-helper-reaper`
   feature. Its Rust helper is supplied by a reproducible Nix derivation and is
   not added to the default package closure.
@@ -45,6 +49,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Local app generation is transactional: `install.sh` builds and validates a
+  sibling candidate before replacing `codex-app`, keeps the working app on
+  rejected or inconclusive candidates, and restores its backup if promotion
+  fails.
 - Cold starts overlap the webview server boot with the rest of launcher
   startup and run the five bundled plugin cache syncs concurrently. The
   launcher now spawns the Python webview server, does CLI lookup and cache

@@ -74,6 +74,11 @@ Environment variables:
   ELECTRON_MIRROR     Override the Electron runtime download mirror root
                       (example: https://npmmirror.com/mirrors/electron/)
   REBUILD_REPORT_DIR  Default report directory for --inspect and rebuild reports
+  CODEX_ACCEPTANCE_OVERRIDE=1
+                      Developer-only promotion override for a completely built
+                      candidate rejected by the shared acceptance profile
+  CODEX_KEEP_REJECTED_CANDIDATE=1
+                      Keep a rejected sibling candidate for diagnostics
 
 After install, launch with:
   ./codex-app/start.sh
