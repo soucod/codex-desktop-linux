@@ -3733,6 +3733,30 @@ test("refreshes only the live Linux tray controller after session recovery", () 
   assert.ok(liveController);
 });
 
+test("keeps Linux tray setup fail-soft when recovery helper insertion drifts", () => {
+  const source = `${mainBundlePrefix}${trayBundleFixture().replace(
+    "var pb=class{trayMenuThreads=",
+    "var pb=class extends globalThis.TrayBase{trayMenuThreads=",
+  )}`;
+
+  const { value: patched, warnings } = captureWarns(() =>
+    applyPatchTwice(applyLinuxTrayPatch, source, null),
+  );
+
+  assert.ok(
+    warnings.includes(
+      "WARN: Could not find tray controller class — skipping Linux tray power-monitor refresh patch",
+    ),
+  );
+  assert.match(patched, /setLinuxTrayContextMenu\(\)\{/);
+  assert.match(
+    patched,
+    /process\.platform===`linux`&&this\.setLinuxTrayContextMenu\(\),this\.tray\.on\(`click`/,
+  );
+  assert.doesNotMatch(patched, /codexLinuxSetTrayController\(this\)/);
+  assert.doesNotMatch(patched, /codexLinuxTrayRecoveryHandler=/);
+});
+
 test("uses collision-proof Linux tray icon variables when Electron alias is r", () => {
   const iconPathExpression = "process.resourcesPath+`/../content/webview/assets/app-test.png`";
   const source = [

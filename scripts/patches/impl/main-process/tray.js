@@ -236,26 +236,41 @@ function applyLinuxTrayPatch(currentSource, iconPathExpression) {
     if (trayControllerClassMatch != null && trayControllerClassMatch.index != null) {
       patchedSource =
         `${patchedSource.slice(0, trayControllerClassMatch.index)}${trayRecoveryHelpers}${patchedSource.slice(trayControllerClassMatch.index)}`;
-    } else if (patchedSource.includes(trayContextMethodNeedle)) {
+    } else if (canSetLinuxTrayContextMenu) {
       console.warn("WARN: Could not find tray controller class — skipping Linux tray power-monitor refresh patch");
     }
   }
+  const canRecoverLinuxTray =
+    canSetLinuxTrayContextMenu && patchedSource.includes("codexLinuxSetTrayController=");
 
   const trayClickNeedle =
     "this.tray.on(`click`,()=>{this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}";
   const trayClickPatchWithoutContextSetup =
     "this.tray.on(`click`,()=>{process.platform===`linux`?this.openNativeTrayMenu():this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}";
+  const trayClickPatchWithContextSetup =
+    "process.platform===`linux`&&this.setLinuxTrayContextMenu(),this.tray.on(`click`,()=>{process.platform===`linux`?this.openNativeTrayMenu():this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}";
   const trayClickPatch =
     "process.platform===`linux`&&(codexLinuxSetTrayController(this),this.setLinuxTrayContextMenu()),this.tray.on(`click`,()=>{process.platform===`linux`?this.openNativeTrayMenu():this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}";
   if (patchedSource.includes("process.platform===`linux`&&(codexLinuxSetTrayController(this),this.setLinuxTrayContextMenu()),this.tray.on(`click`")) {
     // Already patched.
+  } else if (patchedSource.includes(trayClickPatchWithContextSetup)) {
+    if (canRecoverLinuxTray) {
+      patchedSource = patchedSource.replace(trayClickPatchWithContextSetup, trayClickPatch);
+    }
   } else if (patchedSource.includes(trayClickNeedle)) {
     patchedSource = patchedSource.replace(
       trayClickNeedle,
-      canSetLinuxTrayContextMenu ? trayClickPatch : trayClickPatchWithoutContextSetup,
+      canRecoverLinuxTray
+        ? trayClickPatch
+        : canSetLinuxTrayContextMenu
+          ? trayClickPatchWithContextSetup
+          : trayClickPatchWithoutContextSetup,
     );
   } else if (canSetLinuxTrayContextMenu && patchedSource.includes(trayClickPatchWithoutContextSetup)) {
-    patchedSource = patchedSource.replace(trayClickPatchWithoutContextSetup, trayClickPatch);
+    patchedSource = patchedSource.replace(
+      trayClickPatchWithoutContextSetup,
+      canRecoverLinuxTray ? trayClickPatch : trayClickPatchWithContextSetup,
+    );
   } else {
     console.warn("WARN: Could not find tray click handler — skipping Linux tray menu click patch");
   }
