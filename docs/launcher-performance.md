@@ -116,8 +116,8 @@ opts into the existing synchronous check while preserving fail-soft behavior for
 a CLI that is not known broken. A detected npm-managed CLI missing
 `@openai/codex-linux-x64` or `@openai/codex-linux-arm64` is the blocking
 exception: Electron cannot use that CLI, so the launcher waits for one repair
-attempt. The repair is bounded to 90 seconds, the repaired CLI version probe to
-5 seconds, and the follow-up npm registry lookup to 20 seconds. Each command
-runs in a dedicated process group that is terminated on timeout, including child
-processes; failure then stops startup with manual reinstall instructions instead
-of leaving the loading screen stuck.
+attempt. The updater's initial and post-repair CLI version probes are each
+bounded to 5 seconds, the repair to 90 seconds, and the follow-up npm registry
+lookup to 20 seconds. Each command runs in a dedicated process group that is
+terminated on timeout, including child processes; failure then stops startup
+with manual reinstall instructions instead of leaving the loading screen stuck.

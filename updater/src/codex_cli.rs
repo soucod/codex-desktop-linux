@@ -31,7 +31,7 @@ const CLI_NOT_INSTALLED_MESSAGE: &str =
 const CLI_VERSION_CHECK_TTL: Duration = Duration::hours(1);
 const NPM_REPAIR_INSTALL_TIMEOUT: StdDuration = StdDuration::from_secs(90);
 const NPM_REPAIR_REGISTRY_TIMEOUT: StdDuration = StdDuration::from_secs(20);
-const NPM_REPAIR_CLI_VERIFY_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+const CLI_PREFLIGHT_VERSION_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const BOUNDED_COMMAND_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const BOUNDED_COMMAND_TERMINATION_GRACE: StdDuration = StdDuration::from_millis(500);
 const BOUNDED_COMMAND_OUTPUT_DRAIN_TIMEOUT: StdDuration = StdDuration::from_secs(1);
@@ -60,6 +60,22 @@ pub fn preflight(
     explicit_cli_path: Option<PathBuf>,
     allow_install_missing: bool,
 ) -> Result<PreflightOutcome> {
+    preflight_with_version_timeout(
+        state,
+        paths,
+        explicit_cli_path,
+        allow_install_missing,
+        CLI_PREFLIGHT_VERSION_TIMEOUT,
+    )
+}
+
+fn preflight_with_version_timeout(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    explicit_cli_path: Option<PathBuf>,
+    allow_install_missing: bool,
+    version_timeout: StdDuration,
+) -> Result<PreflightOutcome> {
     let requested_path = explicit_cli_path.as_deref();
     let (cli_path, installed_missing_cli) = match resolve_cli_path(requested_path) {
         Some(path) => (path, false),
@@ -75,7 +91,7 @@ pub fn preflight(
     let path_env = command_path_env();
     let managed_cli = cli_management::detect_system_package_managed_cli(&cli_path, &path_env);
     let mut repaired_npm_install = None;
-    let installed_version = match read_installed_version(&cli_path) {
+    let installed_version = match read_installed_version_bounded(&cli_path, version_timeout) {
         Ok(version) => version,
         Err(probe_error) => {
             let Some(missing_dependency) = missing_platform_optional_dependency(&probe_error)
@@ -106,10 +122,7 @@ pub fn preflight(
 
             let repaired_version = repair_npm_optional_dependency(&npm_install)
                 .and_then(|()| {
-                    read_installed_version_bounded(
-                        &cli_path,
-                        NPM_REPAIR_CLI_VERIFY_TIMEOUT,
-                    )
+                    read_installed_version_bounded(&cli_path, version_timeout)
                 })
                 .with_context(|| {
                     format!(
@@ -2909,6 +2922,35 @@ exit 1
             .contains("standalone Codex CLI installer failed"));
         assert!(curl_call_log.exists());
         assert!(!npm_install_log.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn initial_cli_version_probe_is_bounded_before_repair() -> Result<()> {
+        let _env_guard = env_lock();
+        let temp = tempdir()?;
+        let paths = test_runtime_paths(temp.path());
+        paths.ensure_dirs()?;
+
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir)?;
+        let codex_path = bin_dir.join("codex");
+        write_executable_script(&codex_path, "#!/bin/sh\nwhile :; do sleep 1; done\n")?;
+        let _restore_env = configure_cli_test_env(temp.path(), [bin_dir])?;
+
+        let mut state = PersistedState::new(true);
+        let started = Instant::now();
+        let error = preflight_with_version_timeout(
+            &mut state,
+            &paths,
+            Some(codex_path),
+            false,
+            StdDuration::from_millis(100),
+        )
+        .expect_err("the initial CLI probe must not block synchronous preflight");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < StdDuration::from_secs(3));
         Ok(())
     }
 
