@@ -5358,7 +5358,9 @@ if "CODEX_CLI_PROBE_STDERR_FILE" in source:
     raise SystemExit("launcher CLI probes must not expose stderr redirection through inherited environment")
 if 'local require_success="${2:-0}"' not in cli_preflight_body:
     raise SystemExit("CLI preflight must support a required-success repair mode")
-if not re.search(r'elif codex_cli_missing_optional_dependency "\$CODEX_CLI_PATH"; then\s+if ! run_cli_preflight 0 1; then.*?exit 1.*?cli_preflight_repair_sync', runtime_body, re.S):
+if not re.search(r'cli_repair_required=0\s+if codex_cli_missing_optional_dependency "\$CODEX_CLI_PATH"; then\s+cli_repair_required=1\s+fi\s+if \[ "\$\{CODEX_SYNC_CLI_PREFLIGHT:-0\}" = "1" \]; then\s+if ! run_cli_preflight 0 "\$cli_repair_required"; then.*?exit 1.*?cli_preflight_repair_sync', runtime_body, re.S):
+    raise SystemExit("sync CLI preflight must detect a required repair first and preserve fail-closed semantics")
+if not re.search(r'elif \[ "\$cli_repair_required" = "1" \]; then\s+if ! run_cli_preflight 0 1; then.*?exit 1.*?cli_preflight_repair_sync', runtime_body, re.S):
     raise SystemExit("a known broken Linux CLI must be repaired synchronously or abort before Electron launch")
 if 'codex_run_host_command notify-send' not in notify_body:
     raise SystemExit("desktop notifications must not inherit packaged LD_LIBRARY_PATH")
@@ -6221,7 +6223,8 @@ PY
 test_launcher_cli_resolution_policy() {
     info "Checking launcher CLI resolution policy"
     local launcher_probe="$TMP_DIR/launcher-cli-policy-probe.sh"
-    python3 - "$REPO_DIR/launcher/start.sh.template" "$launcher_probe" <<'PY'
+    local routing_probe="$TMP_DIR/launcher-cli-preflight-routing-probe.sh"
+    python3 - "$REPO_DIR/launcher/start.sh.template" "$launcher_probe" "$routing_probe" <<'PY'
 import pathlib
 import re
 import sys
@@ -6264,8 +6267,39 @@ esac
 ''',
     encoding="utf-8",
 )
+
+preflight_match = re.search(r"^run_cli_preflight\(\) \{[\s\S]*?^\}\n", source, re.M)
+if preflight_match is None:
+    raise SystemExit("missing run_cli_preflight")
+routing_start = source.index('if needs_cold_start; then\n    cli_repair_required=0')
+routing_end = source.index("\nexport_packaged_runtime_env", routing_start)
+pathlib.Path(sys.argv[3]).write_text(
+    "#!/usr/bin/env bash\n"
+    "set -Eeuo pipefail\n\n"
+    + r'''
+CODEX_CLI_PATH=/tmp/codex
+has_update_manager() { [ "${UPDATE_MANAGER_AVAILABLE:-0}" = "1" ]; }
+run_update_manager() {
+    if [ "${UPDATE_MANAGER_RESULT:-failure}" = "success" ]; then
+        printf '%s\n' /tmp/repaired-codex
+        return 0
+    fi
+    return 1
+}
+notify_error() { printf 'notify=%s\n' "$1" >> "$ROUTING_LOG"; }
+log_phase() { printf 'phase=%s\n' "$1" >> "$ROUTING_LOG"; }
+needs_cold_start() { return 0; }
+codex_cli_missing_optional_dependency() { [ "${BROKEN_CLI:-0}" = "1" ]; }
+run_cli_preflight_background() { printf 'background=1\n' >> "$ROUTING_LOG"; }
+'''
+    + preflight_match.group(0)
+    + "\n"
+    + source[routing_start:routing_end]
+    + "\n",
+    encoding="utf-8",
+)
 PY
-    chmod +x "$launcher_probe"
+    chmod +x "$launcher_probe" "$routing_probe"
 
     local workspace="$TMP_DIR/launcher-cli-policy"
     local fake_home="$workspace/home"
@@ -6409,6 +6443,43 @@ PY
         kill -9 "$hanging_log_pid" 2>/dev/null || true
         fail "hanging CLI log probe left process $hanging_log_pid alive"
     fi
+
+    local routing_log="$workspace/preflight-routing.log"
+    if env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
+        CODEX_SYNC_CLI_PREFLIGHT=1 BROKEN_CLI=1 UPDATE_MANAGER_AVAILABLE=0 \
+        "$routing_probe"; then
+        fail "sync preflight must abort when a known-broken CLI cannot be repaired"
+    fi
+    grep -q '^notify=The selected Codex CLI is missing' "$routing_log" || \
+        fail "sync required repair failure must show actionable reinstall guidance"
+
+    : > "$routing_log"
+    env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
+        CODEX_SYNC_CLI_PREFLIGHT=1 BROKEN_CLI=1 UPDATE_MANAGER_AVAILABLE=1 \
+        UPDATE_MANAGER_RESULT=success "$routing_probe"
+    grep -qx 'phase=cli_preflight_repair_sync' "$routing_log" || \
+        fail "sync preflight must record a successful required repair"
+
+    : > "$routing_log"
+    env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
+        CODEX_SYNC_CLI_PREFLIGHT=1 BROKEN_CLI=0 UPDATE_MANAGER_AVAILABLE=0 \
+        "$routing_probe"
+    grep -qx 'phase=cli_preflight_sync' "$routing_log" || \
+        fail "sync preflight must remain fail-soft for a CLI that is not known broken"
+
+    : > "$routing_log"
+    if env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
+        BROKEN_CLI=1 UPDATE_MANAGER_AVAILABLE=0 "$routing_probe"; then
+        fail "default preflight must abort when a known-broken CLI cannot be repaired"
+    fi
+
+    : > "$routing_log"
+    env -i PATH="$HOST_TOOL_PATH" ROUTING_LOG="$routing_log" \
+        BROKEN_CLI=0 UPDATE_MANAGER_AVAILABLE=0 "$routing_probe"
+    grep -qx 'background=1' "$routing_log" || \
+        fail "healthy default preflight must stay asynchronous"
+    grep -qx 'phase=cli_preflight_backgrounded' "$routing_log" || \
+        fail "healthy default preflight must record the background path"
 }
 
 test_webview_server_cache_policy() {

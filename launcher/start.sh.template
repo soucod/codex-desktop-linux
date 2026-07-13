@@ -3895,10 +3895,21 @@ if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
 fi
 
 if needs_cold_start; then
+    cli_repair_required=0
+    if codex_cli_missing_optional_dependency "$CODEX_CLI_PATH"; then
+        cli_repair_required=1
+    fi
     if [ "${CODEX_SYNC_CLI_PREFLIGHT:-0}" = "1" ]; then
-        run_cli_preflight 0
-        log_phase "cli_preflight_sync"
-    elif codex_cli_missing_optional_dependency "$CODEX_CLI_PATH"; then
+        if ! run_cli_preflight 0 "$cli_repair_required"; then
+            notify_error "The selected Codex CLI is missing its Linux optional dependency and could not be repaired automatically. Reinstall it with: npm i -g --include=optional @openai/codex@latest or npm i -g --include=optional --prefix ~/.local @openai/codex@latest"
+            exit 1
+        fi
+        if [ "$cli_repair_required" = "1" ]; then
+            log_phase "cli_preflight_repair_sync"
+        else
+            log_phase "cli_preflight_sync"
+        fi
+    elif [ "$cli_repair_required" = "1" ]; then
         if ! run_cli_preflight 0 1; then
             notify_error "The selected Codex CLI is missing its Linux optional dependency and could not be repaired automatically. Reinstall it with: npm i -g --include=optional @openai/codex@latest or npm i -g --include=optional --prefix ~/.local @openai/codex@latest"
             exit 1
