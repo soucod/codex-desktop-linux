@@ -5587,8 +5587,13 @@ if "reap_orphaned_runtime_processes" in source or "pid_is_orphaned_runtime_proce
     raise SystemExit("lock timeout must not kill processes belonging to the active serialized cold start")
 if "LAUNCHER_LOCK_HELD=1" not in source or "stop_launcher_lock_helper" not in source:
     raise SystemExit("launcher must explicitly release and reap its dedicated lock helper")
-if "signal.SIGUSR1, 500" not in source or "signal.SIGTERM, 500" not in source or "signal.SIGKILL, 500" not in source:
-    raise SystemExit("launcher lock helper shutdown must use bounded identity-bound pidfd escalation")
+stop_helper_body = source.split("stop_launcher_lock_helper() {", 1)[1].split("release_launcher_lock() {", 1)[0]
+if "pidfd_open" in stop_helper_body or "pidfd_send_signal" in stop_helper_body:
+    raise SystemExit("normal launcher lock release must not require pidfd")
+if 'kill -TERM "$LAUNCHER_LOCK_HELPER_PID"' not in stop_helper_body:
+    raise SystemExit("launcher lock helper must release through a verified child signal")
+if 'read().strip() == "release"' in source or '"release\\n"' in source:
+    raise SystemExit("launcher lock release must not add a status-file control protocol")
 if "launcher_lock_helper_is_active" not in source or "require_active_launcher_lock" not in launch_body:
     raise SystemExit("launcher must fail closed if the identity-bound lock helper exits before Electron")
 if "LAUNCHER_LOCK_CONTROL_PATH" in source or "mkfifo" in source:
@@ -10078,6 +10083,10 @@ test_launcher_warm_start_recovery() {
     bash "$REPO_DIR/tests/launcher_warm_start_recovery.sh"
     CODEX_TEST_DISABLE_WARM_START=1 bash "$REPO_DIR/tests/launcher_warm_start_recovery.sh"
     CODEX_TEST_KILL_DURING_PRELAUNCH=1 bash "$REPO_DIR/tests/launcher_warm_start_recovery.sh"
+    CODEX_TEST_DISABLE_PIDFD=1 CODEX_TEST_NORMAL_LOCK_ONLY=1 \
+        bash "$REPO_DIR/tests/launcher_warm_start_recovery.sh"
+    CODEX_TEST_DISABLE_PIDFD=1 CODEX_TEST_KILL_DURING_PRELAUNCH=1 \
+        bash "$REPO_DIR/tests/launcher_warm_start_recovery.sh"
 }
 
 test_notification_actions_bridge_accepts_prebuilt_binary() {

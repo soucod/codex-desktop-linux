@@ -3873,9 +3873,6 @@ parent_pid = int(sys.argv[1])
 lock_path, wait_text, status_path = sys.argv[2:]
 wait_seconds = int(wait_text)
 
-if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
-    sys.exit(1)
-
 libc_name = ctypes.util.find_library("c") or "libc.so.6"
 try:
     libc = ctypes.CDLL(libc_name, use_errno=True)
@@ -3978,49 +3975,16 @@ launcher_lock_helper_is_active() {
 }
 
 stop_launcher_lock_helper() {
-    python3 - \
-        "$LAUNCHER_LOCK_HELPER_PID" \
-        "$LAUNCHER_LOCK_HELPER_START_TIME" \
-        "${BASHPID:-$$}" <<'PY'
-import os
-import select
-import signal
-import sys
+    local actual_start_time
+    local cmdline
 
-pid = int(sys.argv[1])
-expected_start_time = sys.argv[2]
-expected_parent = int(sys.argv[3])
-
-if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
-    sys.exit(1)
-try:
-    pidfd = os.pidfd_open(pid, 0)
-    with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as handle:
-        fields = handle.read().rsplit(") ", 1)[1].split()
-    if fields[19] != expected_start_time or int(fields[1]) != expected_parent:
-        os.close(pidfd)
-        sys.exit(1)
-    poller = select.poll()
-    poller.register(pidfd, select.POLLIN)
-    exited = False
-    for requested_signal, wait_ms in (
-        (signal.SIGUSR1, 500),
-        (signal.SIGTERM, 500),
-        (signal.SIGKILL, 500),
-    ):
-        try:
-            signal.pidfd_send_signal(pidfd, requested_signal)
-        except ProcessLookupError:
-            exited = True
-            break
-        if poller.poll(wait_ms):
-            exited = True
-            break
-    os.close(pidfd)
-    sys.exit(0 if exited else 1)
-except (OSError, IndexError, ValueError):
-    sys.exit(1)
-PY
+    [[ "$LAUNCHER_LOCK_HELPER_PID" =~ ^[0-9]+$ ]] || return 1
+    actual_start_time="$(pid_start_time "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || true)"
+    [ -n "$actual_start_time" ] && [ "$actual_start_time" = "$LAUNCHER_LOCK_HELPER_START_TIME" ] || return 1
+    pid_parent_matches "$LAUNCHER_LOCK_HELPER_PID" "${BASHPID:-$$}" || return 1
+    cmdline="$(pid_cmdline "$LAUNCHER_LOCK_HELPER_PID")"
+    [[ "$cmdline" == *" $APP_STATE_DIR/launcher.lock "*" $LAUNCHER_LOCK_STATUS_PATH"* ]] || return 1
+    kill -TERM "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || ! kill -0 "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null
 }
 
 release_launcher_lock() {
@@ -4030,7 +3994,7 @@ release_launcher_lock() {
         if stop_launcher_lock_helper; then
             wait "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || true
         else
-            echo "WARN: launcher lock helper did not exit after bounded pidfd signals" >&2
+            echo "WARN: launcher lock helper did not exit after a verified release signal" >&2
         fi
     fi
     LAUNCHER_LOCK_HELPER_PID=""
