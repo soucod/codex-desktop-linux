@@ -31,6 +31,11 @@ run_node_tests() {
 
     node scripts/ci/manage-labels.js --check
 
+    if node --help | grep -q -- "--test-force-exit"; then
+        # All assertions must finish, but a leaked worker handle must not hold CI open.
+        node_test_args+=(--test-force-exit)
+    fi
+
     while IFS= read -r file; do
         test_files+=("$file")
     done < <(git ls-files '*.test.js' 'linux-features/*/test.js')
