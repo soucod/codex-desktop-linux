@@ -7,9 +7,67 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const { pathToFileURL } = require("node:url");
 
 const patcher = path.join(__dirname, "patch-browser-client-iab-socket-scope.js");
+
+test("Linux socket discovery uses the override, runtime directory, then UID fallback", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-user-socket-dir-"));
+  const clientPath = path.join(workspace, "browser-client.mjs");
+  const fixture =
+    'var kE=t=>t==="win32"?"\\\\\\\\.\\\\pipe\\\\codex-browser-use":"/tmp/codex-browser-use";globalThis.result=kE("linux");';
+
+  try {
+    fs.writeFileSync(clientPath, fixture, "utf8");
+    const firstPatch = spawnSync(process.execPath, [patcher, clientPath, "--socket-dir-only"], {
+      encoding: "utf8",
+    });
+    assert.equal(firstPatch.status, 0, firstPatch.stderr);
+    const patched = fs.readFileSync(clientPath, "utf8");
+    assert.match(patched, /codexLinuxPerUserBrowserSocketDir/);
+
+    const resolve = (env, uid = 1000) => {
+      const context = { process: { env, getuid: () => uid } };
+      context.globalThis = context;
+      vm.runInNewContext(patched, context);
+      return context.result;
+    };
+    assert.equal(
+      resolve({ CODEX_BROWSER_USE_SOCKET_DIR: "/custom/browser-sockets" }),
+      "/custom/browser-sockets",
+    );
+    assert.equal(
+      resolve({ XDG_RUNTIME_DIR: "/run/user/1000/" }),
+      "/run/user/1000/codex-browser-use",
+    );
+    assert.equal(resolve({}, 1001), "/tmp/codex-browser-use-1001");
+
+    const secondPatch = spawnSync(process.execPath, [patcher, clientPath, "--socket-dir-only"], {
+      encoding: "utf8",
+    });
+    assert.equal(secondPatch.status, 0, secondPatch.stderr);
+    assert.equal(fs.readFileSync(clientPath, "utf8"), patched);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("keeps the per-user socket patch when IAB discovery cannot be identified", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-user-socket-only-"));
+  const clientPath = path.join(workspace, "browser-client.mjs");
+  const fixture =
+    'var kE=t=>t==="win32"?"\\\\\\\\.\\\\pipe\\\\codex-browser-use":"/tmp/codex-browser-use";';
+
+  try {
+    fs.writeFileSync(clientPath, fixture, "utf8");
+    const result = spawnSync(process.execPath, [patcher, clientPath], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(fs.readFileSync(clientPath, "utf8"), /codexLinuxPerUserBrowserSocketDir/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
 
 test("IAB discovery excludes extension sockets before connecting", async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-iab-socket-scope-"));

@@ -26,7 +26,7 @@ use chrome_runtime::RuntimeManager;
 const HOST_NAME: &str = "com.openai.codexextension";
 const SOCKET_DIR_ENV: &str = "CODEX_BROWSER_USE_SOCKET_DIR";
 const SESSIONS_DIR_ENV: &str = "CODEX_BROWSER_USE_SESSIONS_DIR";
-const DEFAULT_SOCKET_DIR: &str = "/tmp/codex-browser-use";
+const SOCKET_DIR_NAME: &str = "codex-browser-use";
 const ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const OBSERVED_TURN_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const ROLLOUT_SEARCH_MAX_DEPTH: usize = 5;
@@ -365,9 +365,20 @@ fn main() -> Result<()> {
 }
 
 fn socket_dir() -> PathBuf {
-    env::var_os(SOCKET_DIR_ENV)
+    if let Some(path) = env::var_os(SOCKET_DIR_ENV).filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR");
+    default_socket_dir(runtime_dir.as_deref(), unsafe { libc::geteuid() })
+}
+
+fn default_socket_dir(runtime_dir: Option<&std::ffi::OsStr>, effective_uid: u32) -> PathBuf {
+    runtime_dir
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_DIR))
+        .map(|path| path.join(SOCKET_DIR_NAME))
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/{SOCKET_DIR_NAME}-{effective_uid}")))
 }
 
 fn sessions_root() -> Option<PathBuf> {
@@ -1026,6 +1037,22 @@ fn log(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_directory_prefers_the_per_user_runtime_directory() {
+        assert_eq!(
+            default_socket_dir(Some(std::ffi::OsStr::new("/run/user/1000")), 1000),
+            PathBuf::from("/run/user/1000/codex-browser-use")
+        );
+    }
+
+    #[test]
+    fn socket_directory_fallback_is_scoped_by_uid() {
+        assert_eq!(
+            default_socket_dir(None, 1000),
+            PathBuf::from("/tmp/codex-browser-use-1000")
+        );
+    }
 
     #[test]
     fn frame_round_trip_uses_native_length_prefix() {
