@@ -113,6 +113,7 @@ const {
   applyLinuxSettingsPersistencePatch,
 } = require("./patches/impl/launch-actions.js");
 const {
+  applyLinuxBootstrapFailureExitPatch,
   applyLinuxMultiInstanceBootstrapPatch,
 } = require("./patches/impl/bootstrap.js");
 const {
@@ -130,10 +131,14 @@ const {
   featurePatchDescriptors,
 } = require("./patches/runner.js");
 const {
+  applyExtractedAppPatchDescriptors,
   applyMainBundlePatchDescriptors,
   discoverCorePatchDescriptors,
   normalizePatchDescriptors,
 } = require("./patches/engine.js");
+const bootstrapPatchDescriptors = require(
+  "./patches/core/all-linux/extracted-app/bootstrap/patch.js",
+);
 const {
   detectLinuxTargetContext,
   linuxTargetSummary,
@@ -924,6 +929,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-native-titlebar",
     "linux-menu",
     "linux-multi-instance-bootstrap-lock",
+    "linux-bootstrap-failure-exit",
     "linux-set-icon",
     "linux-resize-repaint",
     "linux-opaque-background",
@@ -4545,6 +4551,208 @@ test("upgrades the legacy guarded bootstrap single-instance lock to the enforced
     /if\(!\(process\.platform===`linux`\?process\.env\.CODEX_LINUX_MULTI_LAUNCH===`1`\|\|e\.app\.requestSingleInstanceLock\(\):!\$\|\|e\.app\.requestSingleInstanceLock\(\)\)\)/,
   );
   assert.ok(!patched.includes("&&process.env.CODEX_LINUX_MULTI_LAUNCH"));
+});
+
+function bootstrapFailureBundleFixture() {
+  return [
+    "async function boot(){try{throw Error(`boom`)}catch(e){",
+    "for(let t of i.BrowserWindow.getAllWindows())t.isDestroyed()||t.destroy();",
+    "l.ei().error(`Desktop bootstrap failed to start the main app`,{safe:{phase:`bootstrap-import-main`}}),",
+    "n.captureException(e,{tags:{phase:`bootstrap-import-main`}}),await oe(e)}}",
+  ].join("");
+}
+
+function currentBootstrapBundleFixture() {
+  return [
+    "var S=t.x({isMacOS:b,isPackaged:i.app.isPackaged});",
+    "if(!(!S||i.app.requestSingleInstanceLock()))i.app.exit(0);",
+    bootstrapFailureBundleFixture(),
+  ].join("");
+}
+
+function applyBootstrapDescriptors(extractedDir) {
+  const report = createPatchReport();
+  applyExtractedAppPatchDescriptors(
+    extractedDir,
+    normalizePatchDescriptors(bootstrapPatchDescriptors),
+    {},
+    report,
+    "extracted-app:pre-webview",
+  );
+  return report;
+}
+
+test("patches the hashed bootstrap bundle loaded by the production entrypoint", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bootstrap-layout-"));
+  try {
+    const buildDir = path.join(tempRoot, ".vite", "build");
+    const bundlePath = path.join(buildDir, "bootstrap-C6R0_AGB.js");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(buildDir, "early-bootstrap.js"),
+      'require("./src-C7E6KJ89.js"),Promise.resolve().then(()=>require("./bootstrap-C6R0_AGB.js"));',
+    );
+    fs.writeFileSync(bundlePath, currentBootstrapBundleFixture());
+
+    const firstReport = applyBootstrapDescriptors(tempRoot);
+    const patched = fs.readFileSync(bundlePath, "utf8");
+    assert.match(patched, /CODEX_LINUX_MULTI_LAUNCH/);
+    assert.match(patched, /process\.platform===`linux`&&i\.app\.exit\(1\)/);
+    assert.deepEqual(
+      firstReport.patches.map(({ name, status }) => ({ name, status })),
+      [
+        { name: "linux-multi-instance-bootstrap-lock", status: "applied" },
+        { name: "linux-bootstrap-failure-exit", status: "applied" },
+      ],
+    );
+
+    const secondReport = applyBootstrapDescriptors(tempRoot);
+    assert.equal(fs.readFileSync(bundlePath, "utf8"), patched);
+    assert.deepEqual(
+      secondReport.patches.map(({ name, status }) => ({ name, status })),
+      [
+        { name: "linux-multi-instance-bootstrap-lock", status: "already-applied" },
+        { name: "linux-bootstrap-failure-exit", status: "already-applied" },
+      ],
+    );
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("fails required bootstrap patches when the production target is missing or ambiguous", async (t) => {
+  const cases = [
+    {
+      name: "obsolete adjacent bootstrap.js only",
+      entrypoint: null,
+      bundles: [["bootstrap.js", currentBootstrapBundleFixture()]],
+    },
+    {
+      name: "referenced hashed bundle missing",
+      entrypoint: 'require("./bootstrap-missing.js");',
+      bundles: [],
+    },
+    {
+      name: "multiple hashed bundles referenced",
+      entrypoint: 'require("./bootstrap-one.js");require("./bootstrap-two.js");',
+      bundles: [
+        ["bootstrap-one.js", currentBootstrapBundleFixture()],
+        ["bootstrap-two.js", currentBootstrapBundleFixture()],
+      ],
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bootstrap-drift-"));
+      try {
+        const buildDir = path.join(tempRoot, ".vite", "build");
+        fs.mkdirSync(buildDir, { recursive: true });
+        if (fixture.entrypoint != null) {
+          fs.writeFileSync(path.join(buildDir, "early-bootstrap.js"), fixture.entrypoint);
+        }
+        for (const [name, source] of fixture.bundles) {
+          fs.writeFileSync(path.join(buildDir, name), source);
+        }
+
+        const report = applyBootstrapDescriptors(tempRoot);
+        assert.deepEqual(
+          report.patches.map(({ name, status }) => ({ name, status })),
+          [
+            { name: "linux-multi-instance-bootstrap-lock", status: "failed-required" },
+            { name: "linux-bootstrap-failure-exit", status: "skipped-optional" },
+          ],
+        );
+        assert.equal(criticalFailuresFromReport(report).length, 1);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("warns without failing when the optional bootstrap failure handler drifts", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bootstrap-handler-drift-"));
+  try {
+    const buildDir = path.join(tempRoot, ".vite", "build");
+    const bundlePath = path.join(buildDir, "bootstrap-current.js");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(buildDir, "early-bootstrap.js"),
+      'require("./bootstrap-current.js");',
+    );
+    fs.writeFileSync(
+      bundlePath,
+      "var S=t.x({isMacOS:b,isPackaged:i.app.isPackaged});" +
+        "if(!(!S||i.app.requestSingleInstanceLock()))i.app.exit(0);",
+    );
+
+    const report = applyBootstrapDescriptors(tempRoot);
+    assert.deepEqual(
+      report.patches.map(({ name, status }) => ({ name, status })),
+      [
+        { name: "linux-multi-instance-bootstrap-lock", status: "applied" },
+        { name: "linux-bootstrap-failure-exit", status: "skipped-optional" },
+      ],
+    );
+    assert.equal(criticalFailuresFromReport(report).length, 0);
+    assert.match(
+      report.patches[1].reason,
+      /Could not find bootstrap failure handler/,
+    );
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("bounds Linux bootstrap failure dialogs and exits the failed instance", () => {
+  const patched = applyPatchTwice(
+    applyLinuxBootstrapFailureExitPatch,
+    bootstrapFailureBundleFixture(),
+  );
+
+  assert.match(
+    patched,
+    /process\.platform===`linux`\?Promise\.race\(\[oe\(e\),new Promise\(e=>setTimeout\(e,15e3\)\)\]\):oe\(e\)/,
+  );
+  assert.match(patched, /process\.platform===`linux`&&i\.app\.exit\(1\)/);
+  assert.equal((patched.match(/i\.app\.exit\(1\)/g) ?? []).length, 1);
+});
+
+test("Linux bootstrap failure exits even when the native dialog never resolves", async () => {
+  const patched = applyLinuxBootstrapFailureExitPatch(bootstrapFailureBundleFixture());
+  const calls = { capture: 0, destroy: 0, exit: [] };
+  const context = {
+    Error,
+    Promise,
+    process: { platform: "linux" },
+    setTimeout(callback) {
+      callback();
+      return 1;
+    },
+    i: {
+      BrowserWindow: {
+        getAllWindows: () => [{
+          destroy: () => { calls.destroy += 1; },
+          isDestroyed: () => false,
+        }],
+      },
+      app: {
+        exit: (status) => calls.exit.push(status),
+      },
+    },
+    l: { ei: () => ({ error() {} }) },
+    n: { captureException: () => { calls.capture += 1; } },
+    oe: () => new Promise(() => {}),
+  };
+  context.globalThis = context;
+
+  vm.runInNewContext(`${patched};globalThis.runBootstrap=boot`, context);
+  await context.runBootstrap();
+
+  assert.equal(calls.destroy, 1);
+  assert.equal(calls.capture, 1);
+  assert.deepEqual(calls.exit, [1]);
 });
 
 test("enforced bootstrap lock takes the Linux lock with upstream flag off and exits the loser", () => {
