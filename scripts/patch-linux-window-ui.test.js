@@ -1325,8 +1325,11 @@ function currentBundledPluginCopyBundleFixture() {
   return (
     "let p=require(`node:path`);" +
     "let m=require(`node:fs/promises`);m={default:m};" +
+    "let h=require(`node:crypto`);" +
     "let g={default:{platform:process.platform}};" +
-    "async function fl(e,t){if(g.default.platform===`darwin`){return}if(g.default.platform!==`win32`){await m.default.cp(e,t,{recursive:!0,verbatimSymlinks:!0});return}}"
+    "let cc=[`.agents`,`plugins`,`marketplace.json`];" +
+    "async function fl(e,t){if(g.default.platform===`darwin`){return}if(g.default.platform!==`win32`){await m.default.cp(e,t,{recursive:!0,verbatimSymlinks:!0});return}}" +
+    "async function Ac(e){let a=`${e.targetMarketplaceRoot}.staging-${h.randomUUID()}`;await m.default.mkdir((0,p.join)(a,...cc.slice(0,-1)),{recursive:!0});await m.default.writeFile((0,p.join)(a,...cc),`{}\\n`,`utf8`);let n=e.sourcePlugin,t=(0,p.join)(a,`plugins`,`chrome`);await m.default.mkdir((0,p.dirname)(t),{recursive:!0}),await fl(n,t);return a}"
   );
 }
 
@@ -7323,7 +7326,7 @@ test("auto-installs the current Chrome plugin gate shape", () => {
   assert.equal((patched.match(/installWhenMissing:!0,name:o\.s/g) || []).length, 0);
 });
 
-test("makes Linux bundled plugin staging writable after copying read-only resources", async () => {
+test("materializes trusted Linux bundled plugins through a private staging root", async () => {
   const patched = applyPatchTwice(
     applyLinuxBundledPluginCopyPermissionsPatch,
     currentBundledPluginCopyBundleFixture(),
@@ -7332,37 +7335,114 @@ test("makes Linux bundled plugin staging writable after copying read-only resour
   const sourcePlugin = path.join(root, "source-plugin");
   const sourceManifestDir = path.join(sourcePlugin, ".codex-plugin");
   const sourceManifest = path.join(sourceManifestDir, "plugin.json");
-  const externalFile = path.join(root, "external-read-only-file");
-  const sourceLink = path.join(sourcePlugin, "external-link");
-  const targetPlugin = path.join(root, "target-plugin");
-  const targetManifest = path.join(targetPlugin, ".codex-plugin", "plugin.json");
-  const targetLink = path.join(targetPlugin, "external-link");
+  const targetMarketplaceRoot = path.join(root, "runtime", "nested", "openai-bundled");
+  const originalUmask = process.umask();
 
   try {
     fs.mkdirSync(sourceManifestDir, { recursive: true });
     fs.writeFileSync(sourceManifest, '{"name":"computer-use"}\n');
-    fs.writeFileSync(externalFile, "external\n");
-    fs.chmodSync(externalFile, 0o444);
-    fs.symlinkSync(externalFile, sourceLink);
     fs.chmodSync(sourceManifest, 0o444);
     fs.chmodSync(sourceManifestDir, 0o555);
     fs.chmodSync(sourcePlugin, 0o555);
+    process.umask(0o002);
 
-    const copyPlugin = new Function("process", "require", `${patched};return fl;`)(
-      { platform: "linux" },
-      require,
-    );
-    await copyPlugin(sourcePlugin, targetPlugin);
+    const materializePlugin = new Function(
+      "process",
+      "require",
+      `${patched};return Ac;`,
+    )({ ...process, platform: "linux" }, require);
+    const stagingRoot = await materializePlugin({ sourcePlugin, targetMarketplaceRoot });
+    const targetPlugin = path.join(stagingRoot, "plugins", "chrome");
+    const targetManifest = path.join(targetPlugin, ".codex-plugin", "plugin.json");
     fs.appendFileSync(targetManifest, "\n");
 
-    assert.match(patched, /async function codexLinuxMakeBundledPluginTreeWritable/);
+    assert.match(patched, /async function codexLinuxValidateBundledPluginSource/);
+    assert.match(patched, /async function codexLinuxPrepareBundledPluginStage/);
+    assert.equal(fs.statSync(stagingRoot).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path.dirname(targetPlugin)).mode & 0o777, 0o700);
     assert.equal(fs.statSync(targetPlugin).mode & 0o200, 0o200);
     assert.equal(fs.statSync(targetManifest).mode & 0o200, 0o200);
-    assert.equal(fs.lstatSync(targetLink).isSymbolicLink(), true);
-    assert.equal(fs.statSync(externalFile).mode & 0o200, 0);
+    assert.equal(fs.statSync(targetPlugin).mode & 0o022, 0);
+    assert.equal(fs.statSync(targetManifest).mode & 0o022, 0);
   } finally {
+    process.umask(originalUmask);
     fs.chmodSync(sourcePlugin, 0o755);
     fs.chmodSync(sourceManifestDir, 0o755);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("applies the Linux bundled plugin trust patch atomically", () => {
+  const source = currentBundledPluginCopyBundleFixture();
+  const withoutStageMkdir = source.replace(
+    "await m.default.mkdir((0,p.join)(a,...cc.slice(0,-1)),{recursive:!0});",
+    "await Promise.resolve();",
+  );
+  const withoutPluginParentMkdir = source.replace(
+    "await m.default.mkdir((0,p.dirname)(t),{recursive:!0}),await fl(n,t)",
+    "await fl(n,t)",
+  );
+
+  assert.equal(applyLinuxBundledPluginCopyPermissionsPatch(withoutStageMkdir), withoutStageMkdir);
+  assert.equal(
+    applyLinuxBundledPluginCopyPermissionsPatch(withoutPluginParentMkdir),
+    withoutPluginParentMkdir,
+  );
+});
+
+test("rejects an untrusted Linux bundled plugin before copying it", async () => {
+  const patched = applyPatchTwice(
+    applyLinuxBundledPluginCopyPermissionsPatch,
+    currentBundledPluginCopyBundleFixture(),
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bundled-plugin-trust-"));
+  const sourceParent = path.join(root, "source-parent");
+  const sourcePlugin = path.join(sourceParent, "source-plugin");
+  const sourceClient = path.join(sourcePlugin, "scripts", "browser-client.mjs");
+  const targetPlugin = path.join(root, "target-plugin");
+
+  try {
+    fs.mkdirSync(path.dirname(sourceClient), { recursive: true });
+    fs.writeFileSync(sourceClient, "tampered\n");
+    fs.chmodSync(sourceClient, 0o664);
+
+    const copyPlugin = new Function("process", "require", `${patched};return fl;`)(
+      { ...process, platform: "linux" },
+      require,
+    );
+    await assert.rejects(copyPlugin(sourcePlugin, targetPlugin), /not trusted/);
+    assert.equal(fs.existsSync(targetPlugin), false);
+
+    fs.chmodSync(sourceClient, 0o644);
+    fs.chmodSync(sourceParent, 0o775);
+    await assert.rejects(copyPlugin(sourcePlugin, targetPlugin), /not trusted/);
+    assert.equal(fs.existsSync(targetPlugin), false);
+
+    fs.chmodSync(sourceParent, 0o755);
+    const unsafeStagingParent = path.join(root, "runtime");
+    fs.mkdirSync(unsafeStagingParent);
+    fs.chmodSync(unsafeStagingParent, 0o775);
+    const materializePlugin = new Function(
+      "process",
+      "require",
+      `${patched};return Ac;`,
+    )({ ...process, platform: "linux" }, require);
+    await assert.rejects(
+      materializePlugin({
+        sourcePlugin,
+        targetMarketplaceRoot: path.join(unsafeStagingParent, "openai-bundled"),
+      }),
+      /not trusted/,
+    );
+    assert.equal(
+      fs.readdirSync(unsafeStagingParent).some((entry) => entry.includes(".staging-")),
+      false,
+    );
+
+    fs.symlinkSync(sourceClient, path.join(sourcePlugin, "client-link"));
+    await assert.rejects(copyPlugin(sourcePlugin, targetPlugin), /not trusted/);
+    assert.equal(fs.existsSync(targetPlugin), false);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
