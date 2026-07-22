@@ -629,6 +629,38 @@ function collectOptionalMatchingAssetPatches(extractedDir, predicate, patchFn) {
   return patches;
 }
 
+function collectLinuxDesktopVisibilityPatch(extractedDir) {
+  const webviewAssetsDir = path.join(extractedDir, "webview", "assets");
+  if (!fs.existsSync(webviewAssetsDir)) {
+    throw new Error(`Required Keybinds settings patch failed: missing webview assets directory ${webviewAssetsDir}`);
+  }
+
+  const candidates = fs
+    .readdirSync(webviewAssetsDir)
+    .filter((name) => /^use-visible-settings-sections-.*\.js$/.test(name))
+    .sort()
+    .filter((name) => {
+      const source = fs.readFileSync(path.join(webviewAssetsDir, name), "utf8");
+      return isSettingsVisibilityBundleSource(source);
+    });
+
+  if (candidates.length !== 1) {
+    throw new Error(
+      `Required Keybinds settings patch failed: could not find exactly one current settings visibility asset (found ${candidates.length})`,
+    );
+  }
+
+  const [candidate] = candidates;
+  const filePath = path.join(webviewAssetsDir, candidate);
+  const currentSource = fs.readFileSync(filePath, "utf8");
+  return [{
+    filePath,
+    currentSource,
+    patchedSource: applyLinuxDesktopSettingsVisibilityPatch(currentSource),
+    patchFn: applyLinuxDesktopSettingsVisibilityPatch,
+  }];
+}
+
 function collectLinuxDesktopIconMapPatches(extractedDir) {
   const webviewAssetsDir = path.join(extractedDir, "webview", "assets");
   if (!fs.existsSync(webviewAssetsDir)) {
@@ -815,11 +847,7 @@ function patchKeybindsSettingsAssets(extractedDir) {
         isSettingsSectionsMetadataBundleSource,
         applyLinuxDesktopSettingsSectionsPatch,
       ),
-      ...collectOptionalMatchingAssetPatches(
-        extractedDir,
-        isSettingsVisibilityBundleSource,
-        applyLinuxDesktopSettingsVisibilityPatch,
-      ),
+      ...collectLinuxDesktopVisibilityPatch(extractedDir),
       ...collectOptionalMatchingAssetPatches(
         extractedDir,
         isSettingsSharedMetadataBundleSource,
@@ -885,18 +913,25 @@ function applyLinuxDesktopSettingsVisibilityPatch(currentSource) {
   // Keep this anchored to the always-visible general/keyboard-shortcuts cases
   // so unrelated slug switches in the same chunk are left untouched.
   const visibilityMarker = "case`linux-desktop`:return!0;";
-  const visibilityAnchorPattern = /case`general-settings`:(?=(?:case`[^`]+`:)*return!0;)/;
-  const hasSettingsVisibilitySwitch =
-    currentSource.includes("case`keyboard-shortcuts`:return!0")
-    && (currentSource.includes(visibilityMarker) || visibilityAnchorPattern.test(currentSource));
-  if (hasSettingsVisibilitySwitch && !currentSource.includes(visibilityMarker)) {
-    return currentSource.replace(
-      visibilityAnchorPattern,
-      `${visibilityMarker}case\`general-settings\`:`,
+  const visibilityAnchorPattern = /case`general-settings`:(?=(?:case`[^`]+`:)*return!0;)/g;
+  const patchedVisibilityPattern = /case`linux-desktop`:return!0;case`general-settings`:(?=(?:case`[^`]+`:)*return!0;)/g;
+  const anchorCount = currentSource.match(visibilityAnchorPattern)?.length ?? 0;
+  const markerCount = currentSource.match(/case`linux-desktop`:return!0;/g)?.length ?? 0;
+  const patchedCount = currentSource.match(patchedVisibilityPattern)?.length ?? 0;
+
+  if (anchorCount === 1 && markerCount === 1 && patchedCount === 1) {
+    return currentSource;
+  }
+  if (anchorCount !== 1 || markerCount !== 0) {
+    throw new Error(
+      `Required Keybinds settings patch failed: expected exactly one current settings visibility match (found ${anchorCount}, ${markerCount} already patched)`,
     );
   }
 
-  return currentSource;
+  return currentSource.replace(
+    visibilityAnchorPattern,
+    `${visibilityMarker}case\`general-settings\`:`,
+  );
 }
 
 function applyLinuxDesktopSettingsSectionsPatch(currentSource) {
@@ -928,7 +963,6 @@ function applyLinuxDesktopSettingsSectionsPatch(currentSource) {
     }
   }
 
-  patchedSource = applyLinuxDesktopSettingsVisibilityPatch(patchedSource);
   return patchedSource;
 }
 
@@ -1241,7 +1275,7 @@ function applyLinuxDesktopSettingsNavigationPatch(currentSource) {
     patchedSource = patchedSource.replace(groupPattern, "$1`linux-desktop`,");
   }
 
-  return applyLinuxDesktopSettingsVisibilityPatch(patchedSource);
+  return patchedSource;
 }
 
 function applyLinuxDesktopSettingsIndexPatch(currentSource) {
